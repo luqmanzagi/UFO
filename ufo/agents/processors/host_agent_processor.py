@@ -4,10 +4,18 @@
 
 import json
 import time
+import platform
+import re
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from pywinauto.controls.uiawrapper import UIAWrapper
+
+# Try to import keyboard send_keys for Windows Start/Search interaction
+try:
+    from pywinauto.keyboard import send_keys  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    send_keys = None  # Fallback handled at runtime
 
 from ufo import utils
 from ufo.agents.processors.actions import (
@@ -88,7 +96,19 @@ class HostAgentProcessor(BaseProcessor):
         self._desktop_screen_url = None
         self._desktop_windows_dict = None
         self._desktop_windows_info = None
-        self.bash_command = None
+        self.bash_command: Optional[str] = None
+
+        # New fields for Windows Search launching
+        self.windows_search_app: Optional[str] = None
+        self._executed_via_windows_search: bool = False
+
+        # Config switch (default True): prefer Windows Search for app launch
+        self._use_windows_search_for_app_launch: bool = (
+            bool(
+                configs.get("HOST_AGENT", {})
+                .get("USE_WINDOWS_SEARCH_FOR_APP_LAUNCH", True)
+            )
+        )
 
     def print_step_info(self) -> None:
         """
@@ -219,6 +239,11 @@ class HostAgentProcessor(BaseProcessor):
         self.question_list = self._response_json.get("Questions", [])
         self.bash_command = self._response_json.get("Bash", None)
 
+        # NEW: accept a WindowsSearchApp field to explicitly request Start/Search launch
+        self.windows_search_app = self._response_json.get("WindowsSearchApp", None)
+        if isinstance(self.windows_search_app, str):
+            self.windows_search_app = self.windows_search_app.strip() or None
+
         self.host_agent.print_response(self._response_json)
 
     @BaseProcessor.exception_capture
@@ -234,15 +259,120 @@ class HostAgentProcessor(BaseProcessor):
         if new_app_window is not None:
             self._select_application(new_app_window)
 
-        # If the bash command is not empty, run the shell command.
-        if self.bash_command:
+        # Try Windows Search launch if requested, or inferred from Bash
+        handled_by_windows_search = False
+        launch_target = None
+
+        if self._use_windows_search_for_app_launch:
+            # Explicit signal from LLM
+            if self.windows_search_app:
+                launch_target = self.windows_search_app
+            else:
+                # Infer from bash
+                candidate = self._extract_app_from_bash(self.bash_command or "")
+                if candidate:
+                    launch_target = candidate
+
+            if launch_target:
+                handled_by_windows_search = self._handle_windows_search_launch(launch_target)
+
+        # If not handled by Windows Search and the bash command is not empty, run the shell command.
+        if (not handled_by_windows_search) and self.bash_command:
             self._run_shell_command()
             time.sleep(5)
 
-        # If the new application window is None and the bash command is None, set the status to FINISH.
-        if new_app_window is None and self.bash_command is None:
+        # If nothing to focus, no bash, and we didn't run Windows Search, set FINISH
+        if new_app_window is None and (self.bash_command is None) and (not handled_by_windows_search):
             self.status = self._agent_status_manager.FINISH.value
             return
+
+    # --------------------
+    # Windows Search helpers
+    # --------------------
+
+    def _handle_windows_search_launch(self, app_name: str) -> bool:
+        """Attempt to launch an application via Windows Start/Search UI."""
+        if not app_name:
+            return False
+
+        success = self._launch_via_windows_search(app_name)
+        self._executed_via_windows_search = success
+
+        # Log an action regardless, so memory captures the attempt
+        action = OneStepAction(
+            control_label="WindowsSearch",
+            control_text=app_name,
+            after_status=self.status,
+            function="windows_search_launch",
+        )
+        action.control_log = BaseControlLog(
+            control_class="WindowsSearch",
+            control_type="SystemUI",
+            control_automation_id="StartMenuSearch"
+        )
+        action.results = ActionExecutionLog(
+            return_value=f"Launched via Windows Search: {app_name}" if success else f"Windows Search launch failed: {app_name}",
+            status=self.status,
+            error="" if success else "Windows Search interaction failed or unavailable"
+        )
+        self.actions = ActionSequence([action])
+
+        # Give the app time to open
+        time.sleep(5)
+        return success
+
+    def _launch_via_windows_search(self, app_name: str, timeout: float = 8.0) -> bool:
+        """Open an app using the Windows Start/Search UI.
+        Returns True on best-effort success, False otherwise.
+        """
+        if platform.system().lower() != "windows":
+            return False
+        if send_keys is None:
+            # Dependency not available
+            return False
+
+        try:
+            # Open Start (tap Win key)
+            send_keys("{VK_LWIN}")
+            time.sleep(0.35)
+
+            # Type app name
+            send_keys(app_name, with_spaces=True, pause=0.02)
+            time.sleep(0.35)
+
+            # Press Enter to launch the top result
+            send_keys("{ENTER}")
+
+            # crude wait window; in a robust impl we would verify via UIA/process
+            t0 = time.time()
+            while time.time() - t0 < timeout:
+                time.sleep(0.2)
+            return True
+        except Exception as e:  # pragma: no cover - GUI runtime issues
+            utils.print_with_color(f"Windows Search launch failed for '{app_name}': {e}", "red")
+            return False
+
+    def _extract_app_from_bash(self, cmd: str) -> Optional[str]:
+        """Extract an app name from a bash/powershell command if it looks like a launch."""
+        if not cmd:
+            return None
+
+        patterns = [
+            r'^\s*(?:start|cmd\s*/c\s*start)\s*(?:""\s*)?"?([\w .+\-]+)"?\s*$',                # start "" "Notepad"
+            r'^\s*powershell(?:\.exe)?\s*-Command\s+Start-Process\s+"?([\w .+\-]+)"?\s*$',     # PS Start-Process Word
+            r'^\s*([\w:\-\\/. ]+\.exe)\b.*$'                                                  # any .exe path
+        ]
+        for p in patterns:
+            m = re.match(p, cmd, flags=re.IGNORECASE)
+            if m:
+                candidate = m.group(1).strip()
+                # strip .exe for better Start/Search results
+                return re.sub(r'\.exe$', '', candidate, flags=re.IGNORECASE)
+        return None
+
+    # --------------------
+    # Existing helpers
+    # --------------------
 
     def _is_window_interface_available(self, new_app_window: UIAWrapper) -> bool:
         """
@@ -379,11 +509,14 @@ class HostAgentProcessor(BaseProcessor):
             RoundStep=self.round_step,
             AgentStep=self.host_agent.step,
             Round=self.round_num,
-            ControlLabel=self.control_label,
+            ControlLabel=self.control_label if self.control_label else ("WindowsSearch" if self._executed_via_windows_search else ""),
             SubtaskIndex=-1,
             FunctionCall=self.actions.get_function_calls(),
             Action=self.actions.to_list_of_dicts(),
-            ActionType="Bash" if self.bash_command else "UIControl",
+            ActionType=(
+                "WindowsSearch" if self._executed_via_windows_search
+                else ("Bash" if self.bash_command else "UIControl")
+            ),
             Request=self.request,
             Agent="HostAgent",
             AgentName=self.host_agent.name,

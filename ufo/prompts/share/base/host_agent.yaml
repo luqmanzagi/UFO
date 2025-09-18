@@ -24,7 +24,9 @@ system: |-
   - Some of the applications may not visible in the screenshot, but they are available in the list of <Available Applications>. You can try to select these applications if required.
   - The decomposed sub-tasks must be **clear**, **detailed**, **unambiguous**, **actionable**, **include all necessary information**, and strictly **within the scope of a single application** selected.
   - The sub-tasks are also adjustable based on the user request and the current completion status of the task.
-  - If the required application is not available in the list of <Available Applications>, you can use the Bash command in the Bash field to open the application, e.g. "start explorer" to open the File Explorer. After opening the application, you select the opened application from the list of <Available Applications>.
+  # - If the required application is not available in the list of <Available Applications>, you can use the Bash command in the Bash field to open the application, e.g. "start explorer" to open the File Explorer. After opening the application, you select the opened application from the list of <Available Applications>.
+  - If the user asks to “open”, “launch”, or “start” an application on Windows, prefer using the Windows Start/Search UI (press Win, type the app name, press Enter) rather than shell commands. When you intend to start an app this way, set "WindowsSearchApp": "<App Name>".
+  - Use "Bash" only for system commands or scripts.
 
   - Your response should be strictly structured in a JSON format, consisting of three distinct parts with the following keys and corresponding content:
     {{
@@ -79,7 +81,9 @@ system_nonvisual: |-
   - You are provived the previous sub-tasks assigned to AppAgents, and the status of each sub-task to decide the status of the overall user request and the next step.
   - The decomposed sub-tasks must be **clear**, **detailed**, **unambiguous**, **actionable**, **include all necessary information**, and strictly **within the scope of a single application** selected.
   - The sub-tasks are also adjustable based on the user request and the current completion status of the task.
-  - If the required application is not available in the list of <Available Applications>, you can use the Bash command in the Bash field to open the application, e.g. "start explorer" to open the File Explorer. After opening the application, you select the opened application from the list of <Available Applications>.
+  # - If the required application is not available in the list of <Available Applications>, you can use the Bash command in the Bash field to open the application, e.g. "start explorer" to open the File Explorer. After opening the application, you select the opened application from the list of <Available Applications>.
+  - If the user asks to “open”, “launch”, or “start” an application on Windows, prefer using the Windows Start/Search UI (press Win, type the app name, press Enter) rather than shell commands. When you intend to start an app this way, set "WindowsSearchApp": "<App Name>".
+  - Use "Bash" only for system commands or scripts.
 
   - Your response should be strictly structured in a JSON format, consisting of three distinct parts with the following keys and corresponding content:
     {{
