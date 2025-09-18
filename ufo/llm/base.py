@@ -97,6 +97,7 @@ class BaseService(abc.ABC):
                 prompt_tokens * prices[name]["input"] / 1000
                 + completion_tokens * prices[name]["output"] / 1000
             )
+            print(f"Prompt tokens: {prompt_tokens}, Completion tokens: {completion_tokens}")
         else:
             return 0
         return cost
