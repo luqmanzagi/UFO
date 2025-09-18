@@ -1,4 +1,4 @@
-CONTROL_BACKEND: ["uia"]  # The backend for control action, currently we support uia, win32 and onmiparser
+CONTROL_BACKEND: ["uia"]  # The backend for control action, currently we support uia, win32 and omniparser
 
 IOU_THRESHOLD_FOR_MERGE: 0.1 # The iou threshold for merging the boxes bewteen controls detected by the UIA and Grouding model.
 
@@ -68,9 +68,11 @@ API_PROMPT: "ufo/prompts/share/base/api.yaml"  # The prompt for the API
 CLICK_API: "click_input" # The click API
 AFTER_CLICK_WAIT: 0 # The wait time after clicking in seconds, even if the value is 0, there will be a small pause. Default 0.09 in pywinauto.
 INPUT_TEXT_API: "type_keys" # The input text API. Can be "type_keys" or "set_text"
-INPUT_TEXT_ENTER: False # whether to press enter after typing the text
+INPUT_TEXT_ENTER: True # whether to press enter after typing the text
+# ---
+# INPUT_TEXT_INTER_KEY_PAUSE will not change anything as we use random function on controller
 INPUT_TEXT_INTER_KEY_PAUSE: 0.05 # The pause time between each key press in seconds. Even if the value is 0, there will be a small pause. Default 0.05 in pywinauto
-
+# ----
 
 ## APIs related
 USE_APIS: True  # Whether to use the API

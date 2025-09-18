@@ -5,6 +5,7 @@ import time
 import warnings
 from abc import abstractmethod
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
+import random
 
 import pyautogui
 import pywinauto
@@ -170,7 +171,9 @@ class ControlReceiver(ReceiverBasic):
         """
 
         text = params.get("text", "")
-        inter_key_pause = configs.get("INPUT_TEXT_INTER_KEY_PAUSE", 0.1)
+        # inter_key_pause = configs.get("INPUT_TEXT_INTER_KEY_PAUSE", 0.1)
+        # Interval between two keystrokes are random 
+        inter_key_pause = random.uniform(0.05, 0.2)
 
         if params.get("clear_current_text", False):
             self.control.type_keys("^a", pause=inter_key_pause)
