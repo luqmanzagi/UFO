@@ -457,6 +457,7 @@ class ActionSequence:
         puppeteer: AppPuppeteer,
         control_dict: Dict[str, UIAWrapper],
         application_window: UIAWrapper,
+        budget_seconds: float = None,
     ) -> None:
         """
         Execute all the actions.

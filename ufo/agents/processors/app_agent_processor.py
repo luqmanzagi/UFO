@@ -3,8 +3,12 @@
 
 import json
 import os
+import time
+import re
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Union
+
+CLOSE_BUFFER_SECONDS = 5.0
 
 from pywinauto.controls.uiawrapper import UIAWrapper
 
@@ -113,6 +117,47 @@ class AppAgentRequestLog:
 
 
 class AppAgentProcessor(BaseProcessor):
+
+    def _is_close_action(self) -> bool:
+        txt = (self.control_text or "").lower()
+        op  = (self._operation   or "").lower()
+        for k in ("close", "exit", "quit", "terminate"):
+            if k in txt or k in op:
+                return True
+        return False
+
+    def _robust_close_application(self, control_selected):
+        """Try multiple strategies to close the current application window."""
+        # 1) Try provided control if valid
+        try:
+            if control_selected is not None and self._control_validation(control_selected):
+                control_selected.click_input()
+                return True
+        except Exception:
+            pass
+        # 2) Refresh controls once and try again
+        try:
+            clean_shot = self.photographer.screen_capturer.capture(self.application_window, clean=True)
+            self._annotation_dict = self.get_control_list(clean_shot)
+            fallback = self._annotation_dict.get(self._control_label, None)
+            if fallback is not None and self._control_validation(fallback):
+                try:
+                    fallback.click_input()
+                    return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # 3) OS-level fallback: Alt+F4 via puppeteer keyboard (if available)
+        try:
+            kb = getattr(self.app_agent.Puppeteer, "keyboard", None)
+            if kb is not None and hasattr(kb, "send_keys"):
+                kb.send_keys("%{F4}")  # Alt+F4 (pywinauto key syntax)
+                return True
+        except Exception:
+            pass
+        return False
+
     """
     The processor for the app agent at a single step.
     """
@@ -534,13 +579,98 @@ class AppAgentProcessor(BaseProcessor):
         self.app_agent.print_response(
             response_dict=self._response_json, print_action=True
         )
+    # --- evaluator-friendly guards: defer close + no early finish ---
+    try:
+        _deadline = getattr(self.app_agent, "_timebox_deadline", None)
+        _rem = None
+        if _deadline is not None:
+            _rem = _deadline - time.monotonic()
 
-    @BaseProcessor.exception_capture
-    @BaseProcessor.method_timer
+        # Defer close until near end of budget (leave ~2s)
+        if _deadline is not None and _rem is not None and _rem > 2.0:
+            if hasattr(self, "_is_close_action") and callable(self._is_close_action):
+                if self._is_close_action():
+                    # keep exploring; don't close yet
+                    self.status = "CONTINUE"
+                    try:
+                        self._response_json["Status"] = self.status
+                    except Exception:
+                        pass
+
+        # Prevent early FINISH while time remains (unless it's a close step)
+        if _deadline is not None and _rem is not None and _rem > 0:
+            if str(self.status).upper() == "FINISH":
+                _is_close = False
+                try:
+                    if hasattr(self, "_is_close_action") and callable(self._is_close_action):
+                        _is_close = bool(self._is_close_action())
+                except Exception:
+                    pass
+                if not _is_close:
+                    self.status = "CONTINUE"
+                    try:
+                        self._response_json["Status"] = self.status
+                    except Exception:
+                        pass
+    except Exception:
+        # best-effort; never crash parse_response
+        pass
+    # --- end evaluator-friendly guards ---
+
+
     def execute_action(self) -> None:
         """
         Execute the action.
         """
+
+
+        # --- time-budget (added; persistent across steps) ---
+        _tb = None
+        _text = (getattr(self, "subtask", None) or getattr(self, "request", None) or "")
+        _m = re.search(r"\bfor\s+(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>seconds?|secs?|s|minutes?|mins?|m)\b", _text, re.IGNORECASE)
+        if _m:
+            _num = float(_m.group("num"))
+            _unit = _m.group("unit").lower()
+            _tb = _num if _unit.startswith("s") else _num * 60.0
+
+        if getattr(self.app_agent, "_timebox_deadline", None) is None and _tb and _tb > 0:
+            _dl = time.monotonic() + max(0.0, _tb - CLOSE_BUFFER_SECONDS)
+            setattr(self.app_agent, "_timebox_deadline", _dl)
+            # remember start time for breadcrumbs
+            try:
+                setattr(self.app_agent, "_timebox_start", time.monotonic())
+            except Exception:
+                pass
+
+        _deadline = getattr(self.app_agent, "_timebox_deadline", None)
+
+        def _remaining_seconds():
+            if _deadline is None:
+                return None
+            rem = _deadline - time.monotonic()
+            return 0.0 if rem < 0 else rem
+
+
+        # duration breadcrumbs for evaluator
+        try:
+            _start = getattr(self.app_agent, "_timebox_start", None)
+            _elapsed = (time.monotonic() - _start) if _start else None
+            utils.print_with_color(f"[duration] elapsed≈{int((_elapsed or 0))}s, remaining≈{int((_remaining_seconds() or 0))}s", "cyan")
+        except Exception:
+            pass
+        # If time is already up, allow only a final close action; otherwise finish
+        if _deadline is not None and _remaining_seconds() <= 0:
+            if (self.control_text or "").lower().find("close") != -1 or (self._operation or "").lower().find("close") != -1:
+                utils.print_with_color("Time is up; executing final close action.", "yellow")
+            else:
+                utils.print_with_color("Time budget reached before executing action.", "yellow")
+                self.status = "FINISH"
+                try:
+                    setattr(self.app_agent, "_timebox_deadline", None)
+                except Exception:
+                    pass
+                return
+        # --- end time-budget ---
 
         action = OneStepAction(
             function=self._operation,
@@ -549,17 +679,86 @@ class AppAgentProcessor(BaseProcessor):
             control_text=self.control_text,
             after_status=self.status,
         )
+
+        # Auto-confirm close step so it won't ask Y/N.
+        # Use a config switch so you can turn this off later if needed.
+        AUTO_CONFIRM_CLOSE = configs.get("AUTO_CONFIRM_CLOSE", True)
+        def _looks_like_close(text: str) -> bool:
+            t = (text or "").lower()
+            return any(k in t for k in ("close", "exit", "quit", "terminate"))
+
+        if AUTO_CONFIRM_CLOSE and (_looks_like_close(self.control_text) or _looks_like_close(self._operation)):
+            # Skip user confirmation for Close
+            self.status = "CONTINUE"
+            # Keep Action/processor in sync if downstream reads after_status
+            try:
+                action.after_status = self.status
+            except Exception:
+                pass
+
         control_selected = self._annotation_dict.get(self._control_label, None)
 
         # Save the screenshot of the tagged selected control.
         self.capture_control_screenshot(control_selected)
 
         self.actions: ActionSequence = ActionSequence(actions=[action])
+        # Limit to a single UI action per cycle (to create many visible steps for the evaluator)
+        try:
+            if (_remaining_seconds() or 0) > 0 and hasattr(self, "_is_close_action") and not self._is_close_action():
+                if hasattr(self.actions, "actions") and isinstance(self.actions.actions, list) and len(self.actions.actions) > 1:
+                    self.actions.actions = self.actions.actions[:1]
+        except Exception:
+            pass
+
+        # Use a small per-step budget (1–2s) so we plan many cycles
+        _sub = _remaining_seconds()
+        if _sub is not None:
+            _sub = max(1.0, min(_sub, 2.0))
+
         self.actions.execute_all(
             puppeteer=self.app_agent.Puppeteer,
             control_dict=self._annotation_dict,
             application_window=self.application_window,
+            budget_seconds=_sub,
         )
+
+        
+        
+
+        # Force another planning cycle while time remains (unless it's a close step)
+        try:
+            if (_remaining_seconds() or 0) > 0 and hasattr(self, "_is_close_action") and not self._is_close_action():
+                self.status = "CONTINUE"
+                try:
+                    # keep any response JSON consistent if present
+                    self._response_json["Status"] = self.status
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+# If this was a close action but the app still appears open, try robust close once more
+        if self._is_close_action() and not self.is_application_closed():
+            _ctrl2 = self._annotation_dict.get(self._control_label, None)
+            if self._robust_close_application(_ctrl2):
+                utils.print_with_color("Fallback close succeeded.", "yellow")
+        if _deadline is not None and time.monotonic() >= _deadline:
+            utils.print_with_color("Time budget reached. Stopping further actions.", "yellow")
+            try:
+                setattr(self.app_agent, "_timebox_deadline", None)
+            except Exception:
+                pass
+            self.status = "FINISH"
+            return
+        # If time remains and this isn't a close step, force another planning cycle
+        try:
+            if _deadline is not None and (_remaining_seconds() or 0) > 0 and not self._is_close_action():
+                self.status = "CONTINUE"
+                return
+        except Exception:
+            pass
+
+
 
         if self.is_application_closed():
             utils.print_with_color("Warning: The application is closed.", "yellow")

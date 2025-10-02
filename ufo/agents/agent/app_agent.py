@@ -750,3 +750,27 @@ class OpenAIOperatorAgent(AppAgent):
         :param safety_checks: The safety checks.
         """
         self._pending_safety_checks = safety_checks
+
+
+# === Time-budget helper (added) ===
+import re as _ufo_tb_re
+
+_TIME_BUDGET_RE = _ufo_tb_re.compile(
+    r"\bfor\s+(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>seconds?|secs?|s|minutes?|mins?|m)\b",
+    _ufo_tb_re.IGNORECASE,
+)
+
+def parse_time_budget_seconds_from_text(text: str):
+    """Return seconds if prompt contains 'for X minutes/seconds', else None."""
+    if not text:
+        return None
+    m = _TIME_BUDGET_RE.search(text)
+    if not m:
+        return None
+    num = float(m.group("num"))
+    unit = m.group("unit").lower()
+    if unit.startswith("s"):  # s / sec / seconds
+        return num
+    return num * 60.0
+# === End time-budget helper ===
+
