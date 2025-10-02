@@ -107,6 +107,45 @@ class BaseProcessor(ABC):
             # Step 7: Parse the response, if there is no error.
             self.parse_response()
 
+            # --- auto-confirm close + duration guard (inserted) ---
+            try:
+                # 1) Skip user confirmation for close/exit/quit steps
+                if hasattr(self, "_is_close_action") and callable(self._is_close_action):
+                    if self._is_close_action() and str(getattr(self, "status", "")).upper() == "CONFIRM":
+                        self.status = self._agent_status_manager.CONTINUE.value
+                        try:
+                            # If the processor keeps a JSON copy of the response, keep it in sync
+                            if hasattr(self, "_response_json") and isinstance(self._response_json, dict):
+                                self._response_json["Status"] = self.status
+                        except Exception:
+                            pass
+
+                # 2) If model tried to FINISH while time remains, keep going (unless it's a close step)
+                _deadline = getattr(getattr(self, "app_agent", None), "_timebox_deadline", None)
+                if _deadline is not None:
+                    _rem = _deadline - time.monotonic()
+                    if str(getattr(self, "status", "")).upper() == "FINISH" and (_rem is not None and _rem > 0):
+                        _is_close = False
+                        try:
+                            if hasattr(self, "_is_close_action") and callable(self._is_close_action):
+                                _is_close = bool(self._is_close_action())
+                        except Exception:
+                            pass
+                        if not _is_close:
+                            try:
+                                utils.print_with_color("Time remains; overriding FINISH to CONTINUE to satisfy duration.", "yellow")
+                            except Exception:
+                                pass
+                            self.status = self._agent_status_manager.CONTINUE.value
+                            try:
+                                if hasattr(self, "_response_json") and isinstance(self._response_json, dict):
+                                    self._response_json["Status"] = self.status
+                            except Exception:
+                                pass
+            except Exception:
+                # Best-effort only; never block the main flow
+                pass
+            # --- end guard (inserted) ---
             if self.is_pending() or self.is_paused():
                 # If the session is pending, update the step and memory, and return.
                 if self.is_pending():
