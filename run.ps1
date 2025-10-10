@@ -157,7 +157,7 @@ foreach ($rawApp in $apps) {
 
   # Build UFO request; app should already be running now
   $request = @"
-Launch (if not already) and explore the app '$displayName' for 3 minutes, then close it safely.
+Launch (if not already) the app '$displayName' and then do:
 
 $common
 "@
