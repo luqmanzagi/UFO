@@ -107,12 +107,20 @@ Health checks:
 ====================
 CLOSE MODULE (main app)
 ====================
-Preferred order: **Close (X)** → **Alt+F4** → **File→Exit**.
+**Assumption:** No user confirmation is required—proceed without asking the user for permission.
+
+Preferred order to close **MAIN**: **Close (X)** → **Alt+F4** → **File→Exit**.
 1) Ensure you’re on **MAIN_WINDOW_HANDLE**. If a CHILD is open, **close CHILD first** (per policy), then close MAIN.
-2) Focus/foreground MAIN; click **Close (X)**.
-3) If ineffective, send **Alt+F4** to the focused MAIN window.
-4) If still open, use **File→Exit/Quit** or an in-app **Exit/Quit** button.
-5) Confirm MAIN closed.
+2) Focus/foreground MAIN; click **Close (X)**. If a **confirmation dialog** or **sub-window** appears (e.g., “Save changes?”, “Are you sure?”, “Rate this app?”, “Update available”):
+   - Immediately choose a **non-saving close** path, in this exact priority:
+     **(a)** Click **No** / **Don’t Save** / **Discard** / **Close** / **Exit without saving**
+     **(b)** If those are missing, click the dialog’s **X** (close button).
+     **(c)** If still blocked, click **Cancel**/**Back** only to dismiss the dialog and retry closing MAIN with Alt+F4.
+   - Never choose **Yes/Save/Buy/Subscribe/Enable/Restart**.
+3) If MAIN is still open, send **Alt+F4** to the focused MAIN window and handle any confirmation dialogs again via the same **No/Don’t Save/Discard/Close/X** preference.
+4) If still open, use **File→Exit/Quit** (or in-app **Exit/Quit**) and again resolve any confirmation dialogs with **No/Don’t Save/Discard/Close/X**.
+5) Repeat handling of any new sub-windows until **MAIN_WINDOW_HANDLE** no longer exists. Log each dialog handled.
+6) Confirm MAIN closed.
 
 ====================
 PSEUDOCODE SKELETON (FOR UFO)
@@ -130,7 +138,7 @@ if not IN_MAIN_VIEW():
 FOREGROUND_AND_VERIFY_MAIN()
 RUN(RANDOM_EXPLORE_MODULE, minutes=3)
 
-RUN(CLOSE_MODULE)  # X → Alt+F4 → File→Exit
+RUN(CLOSE_MODULE)  # X → Alt+F4 → File→Exit; auto-handle confirmations with No/Don’t Save/Discard/Close/X
 
 ====================
 NOTES
