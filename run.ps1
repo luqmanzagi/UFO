@@ -4,6 +4,11 @@
 $appsFile = "app.txt"     # one app name per line (Store name)
 $genericFile = "generic_time.txt"     # optional extra prompt text
 
+# ---- helper: write info/error conveniently ----------------------------------
+function Info($msg)  { Write-Host "[INFO ] $msg" -ForegroundColor Cyan }
+function Warn($msg)  { Write-Warning $msg }
+function Fail($msg)  { Write-Error $msg }
+
 # ---- read files --------------------------------------------------------------
 if (-not (Test-Path $appsFile)) { throw "Missing apps file: $appsFile" }
 $apps = Get-Content $appsFile | Where-Object { $_.Trim() -ne '' }
@@ -131,6 +136,72 @@ function Fallback-StartMenuLaunch([string]$text) {
     return $false
   }
 }
+function Get-RelatedIdsFromPsList {
+  param([Parameter(Mandatory)][string]$Pattern,[switch]$CaseSensitive)
+  $idList = New-Object System.Collections.Generic.List[int]
+  if (Test-Path -LiteralPath ".\helpers\pslist.exe") {
+    $null = & .\helpers\pslist.exe -accepteula 2>$null
+    $lines = & .\helpers\pslist.exe 2>$null
+    if (-not $CaseSensitive) {
+      $lines = $lines | Where-Object { $_ -match [regex]::Escape($Pattern) -or $_ -match [regex]::Escape($Pattern).ToLower() -or $_ -match [regex]::Escape($Pattern).ToUpper() }
+    } else {
+      $lines = $lines | Select-String -Pattern $Pattern | ForEach-Object { $_.ToString() }
+    }
+    foreach ($line in $lines) {
+      $m = [regex]::Match($line, $PsListLineRegex)
+      if ($m.Success) {
+        $theId  = [int]$m.Groups[2].Value
+        if (-not $idList.Contains($theId)) { $idList.Add($theId) }
+      }
+    }
+  }
+  return ,$idList.ToArray()
+}
+
+function Stop-IdsRobust { param([Parameter(Mandatory)][int[]]$Ids)
+  if (-not $Ids -or $Ids.Count -eq 0) { return }
+  $havePskill = Test-Path -LiteralPath ".\helpers\pskill.exe"
+  if ($havePskill) { $null = & .\helpers\pskill.exe -accepteula 2>$null }
+  foreach ($oneId in $Ids) {
+    try {
+      if ($havePskill) {
+        Info "pskill -t $oneId"
+        & .\helpers\pskill.exe -nobanner -t $oneId | Out-Null
+        Start-Sleep -Milliseconds 150
+        if (-not (Get-Process -Id $oneId -ErrorAction SilentlyContinue)) { continue }
+      }
+    } catch { Warn "pskill: $($_.Exception.Message)" }
+    try {
+      Info "taskkill /T /F /PID $oneId"
+      & taskkill.exe /T /F /PID $oneId | Out-Null
+      Start-Sleep -Milliseconds 150
+      if (-not (Get-Process -Id $oneId -ErrorAction SilentlyContinue)) { continue }
+    } catch { Warn "taskkill: $($_.Exception.Message)" }
+    try {
+      Info "Stop-Process -Id $oneId -Force"
+      Stop-Process -Id $oneId -Force -ErrorAction Stop
+      Start-Sleep -Milliseconds 150
+    } catch { Warn "Stop-Process: $($_.Exception.Message)" }
+  }
+}
+
+function Stop-AppProcesses { param([Parameter(Mandatory)][string]$DisplayName)
+  $allIds = @()
+  if (Test-Path -LiteralPath ".\helpers\pslist.exe") {
+    $idsFromSys = Get-RelatedIdsFromPsList -Pattern $DisplayName
+    if ($idsFromSys.Count -gt 0) { $allIds += $idsFromSys }
+  } else { Warn "pslist.exe not found; using native fallback." }
+  try {
+    $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.Name -like "*$DisplayName*" -or $_.MainWindowTitle -like "*$DisplayName*"
+    }
+    foreach ($p in $procs) { if ($allIds -notcontains $p.Id) { $allIds += $p.Id } }
+  } catch {}
+  $allIds = $allIds | Sort-Object -Unique
+  if ($allIds.Count -eq 0) { Info "No matching processes for '$DisplayName'."; return }
+  Info "Terminating related Ids for '$DisplayName': $($allIds -join ', ')"
+  Stop-IdsRobust -Ids $allIds
+}
 
 # ---- main --------------------------------------------------------------------
 $failures = @()
@@ -166,6 +237,7 @@ $common
   # Important: pass a descriptive task AND the resolved name for search context
   python .\helpers\rec.py --grab gdigrab --cursor --out ".\rec\$($displayName -replace '[^a-zA-Z0-9]', '_').mp4"
   python -m ufo --task "$displayName" --request "$request"
+  try { Stop-AppProcesses -DisplayName $displayName } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
   python .\helpers\end_rec.py
 
   # Optional: you could scan UFO logs here to verify it interacted with the app,
