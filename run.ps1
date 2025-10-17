@@ -2,7 +2,7 @@
 
 # ---- config / inputs ---------------------------------------------------------
 $appsFile = "app.txt"     # one app name per line (Store name)
-$genericFile = "generic_time.txt"     # optional extra prompt text
+$genericFile = "simple.txt"     # optional extra prompt text
 
 # ---- helper: write info/error conveniently ----------------------------------
 function Info($msg)  { Write-Host "[INFO ] $msg" -ForegroundColor Cyan }
@@ -28,6 +28,12 @@ $baseDir = if ($PSCommandPath) {
 $recDir = Join-Path $baseDir 'rec'
 if (-not (Test-Path -LiteralPath $recDir)) {
     New-Item -ItemType Directory -Path $recDir -Force | Out-Null
+}
+
+# Ensure .\netdump exists under the script (or current) directory
+$netdumpDir = Join-Path $baseDir 'netdump'
+if (-not (Test-Path -LiteralPath $netdumpDir)) {
+    New-Item -ItemType Directory -Path $netdumpDir -Force | Out-Null
 }
 
 # ---- helpers -----------------------------------------------------------------
@@ -137,58 +143,127 @@ function Fallback-StartMenuLaunch([string]$text) {
   }
 }
 function Get-RelatedIdsFromPsList {
-  param([Parameter(Mandatory)][string]$Pattern,[switch]$CaseSensitive)
-  $idList = New-Object System.Collections.Generic.List[int]
-  if (Test-Path -LiteralPath ".\helpers\pslist.exe") {
-    $null = & .\helpers\pslist.exe -accepteula 2>$null
-    $lines = & .\helpers\pslist.exe 2>$null
-    if (-not $CaseSensitive) {
-      $lines = $lines | Where-Object { $_ -match [regex]::Escape($Pattern) -or $_ -match [regex]::Escape($Pattern).ToLower() -or $_ -match [regex]::Escape($Pattern).ToUpper() }
-    } else {
-      $lines = $lines | Select-String -Pattern $Pattern | ForEach-Object { $_.ToString() }
+    <#
+      .SYNOPSIS
+        Returns related process IDs for a target app, parsed from helpers\pslist.exe (if present)
+        with strong guards to avoid adding PID 0.
+
+      .PARAMETER Target
+        A string to match against the process name / window title (case-insensitive).
+
+      .PARAMETER PsListPath
+        Path to pslist.exe. If not found, falls back to Get-Process.
+
+      .OUTPUTS
+        [int[]] distinct, > 0
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$Target,
+        [string]$PsListPath = ".\helpers\pslist.exe"
+    )
+
+    $pids = @()
+
+    try {
+        if (Test-Path -LiteralPath $PsListPath) {
+            # pslist default output usually has lines like:
+            # procname           pid   ...
+            $raw = & $PsListPath | Out-String
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                foreach ($line in $raw -split "(`r`n|`n)") {
+                    # Try to capture "name" and "pid" numbers; be liberal in spacing
+                    if ($line -match '^\s*(?<name>[^\s]+)\s+(?<pid>\d+)\b') {
+                        $name = $Matches['name']
+                        $pidInt = 0
+                        if ([int]::TryParse($Matches['pid'], [ref]$pidInt) -and $pidInt -gt 0) {
+                            if ($name -like "*$Target*" -or $Target -like "*$name*") {
+                                $pids += $pidInt
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            # Fallback: use built-in Get-Process and fuzzy match on process name / main window title
+            $procs = Get-Process -ErrorAction SilentlyContinue
+            foreach ($p in $procs) {
+                $name = $p.ProcessName
+                $title = $null
+                try { $title = $p.MainWindowTitle } catch {}
+                if ( ($name -and ($name -like "*$Target*")) -or ($title -and ($title -like "*$Target*")) ) {
+                    if ($p.Id -gt 0) { $pids += [int]$p.Id }
+                }
+            }
+        }
+    } catch {
+        Write-Warning "[WARN ] Get-RelatedIdsFromPsList failed: $($_.Exception.Message)"
     }
-    foreach ($line in $lines) {
-      $m = [regex]::Match($line, $PsListLineRegex)
-      if ($m.Success) {
-        $theId  = [int]$m.Groups[2].Value
-        if (-not $idList.Contains($theId)) { $idList.Add($theId) }
-      }
-    }
-  }
-  return ,$idList.ToArray()
+
+    # Final guardrails: remove 0/negatives, dedupe, sort
+    $pids = $pids | Where-Object { $_ -is [int] -and $_ -gt 0 } | Sort-Object -Unique
+    return ,$pids
 }
 
-function Stop-IdsRobust { param([Parameter(Mandatory)][int[]]$Ids)
-  if (-not $Ids -or $Ids.Count -eq 0) { return }
-  $havePskill = Test-Path -LiteralPath ".\helpers\pskill.exe"
-  if ($havePskill) { $null = & .\helpers\pskill.exe -accepteula 2>$null }
-  foreach ($oneId in $Ids) {
+function Stop-IdsRobust {
+
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][object[]]$Ids,
+        [string]$AppName = "",
+        [string]$PsKillPath = ".\helpers\pskill.exe",
+        [switch]$Tree
+    )
+
+    # Sanitize input -> integers > 0
+    $pidList = @()
+    foreach ($i in $Ids) {
+        if ($null -ne $i) {
+            $s = "$i".Trim()
+            if ($s -match '^\d+$') {
+                $v = [int]$s
+                if ($v -gt 0) { $pidList += $v }
+            }
+        }
+    }
+    $pidList = $pidList | Sort-Object -Unique
+
+    if (-not $pidList -or $pidList.Count -eq 0) {
+        Write-Host "[INFO ] No related PIDs found to terminate for '$AppName'."
+        return
+    }
+
+    Write-Host "[INFO ] Terminating related Ids for '$AppName': $($pidList -join ', ')"
+
     try {
-      if ($havePskill) {
-        Info "pskill -t $oneId"
-        & .\helpers\pskill.exe -nobanner -t $oneId | Out-Null
-        Start-Sleep -Milliseconds 150
-        if (-not (Get-Process -Id $oneId -ErrorAction SilentlyContinue)) { continue }
-      }
-    } catch { Warn "pskill: $($_.Exception.Message)" }
-    try {
-      Info "taskkill /T /F /PID $oneId"
-      & taskkill.exe /T /F /PID $oneId | Out-Null
-      Start-Sleep -Milliseconds 150
-      if (-not (Get-Process -Id $oneId -ErrorAction SilentlyContinue)) { continue }
-    } catch { Warn "taskkill: $($_.Exception.Message)" }
-    try {
-      Info "Stop-Process -Id $oneId -Force"
-      Stop-Process -Id $oneId -Force -ErrorAction Stop
-      Start-Sleep -Milliseconds 150
-    } catch { Warn "Stop-Process: $($_.Exception.Message)" }
-  }
+        if (Test-Path -LiteralPath $PsKillPath) {
+            $args = @()
+            if ($Tree.IsPresent) { $args += '-t' }
+            $args += $pidList | ForEach-Object { "$_" }
+
+            Write-Host "[INFO ] $([IO.Path]::GetFileName($PsKillPath)) $($args -join ' ')"
+            $p = Start-Process -FilePath $PsKillPath -ArgumentList $args -NoNewWindow -PassThru -Wait -ErrorAction Stop
+            if ($p.ExitCode -ne 0) {
+                Write-Warning "[WARN ] pskill exited with code $($p.ExitCode). Falling back to Stop-Process."
+                foreach ($single_pid in $pidList) {
+                    try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Write-Warning "[WARN ] Stop-Process($pid): $($_.Exception.Message)" }
+                }
+            }
+        } else {
+            foreach ($single_pid in $pidList) {
+                try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Write-Warning "[WARN ] Stop-Process($pid): $($_.Exception.Message)" }
+            }
+        }
+    } catch {
+        Write-Warning "[WARN ] Stop-IdsRobust failed: $($_.Exception.Message)"
+    }
 }
+
 
 function Stop-AppProcesses { param([Parameter(Mandatory)][string]$DisplayName)
   $allIds = @()
   if (Test-Path -LiteralPath ".\helpers\pslist.exe") {
-    $idsFromSys = Get-RelatedIdsFromPsList -Pattern $DisplayName
+    $idsFromSys = Get-RelatedIdsFromPsList -Target $DisplayName
     if ($idsFromSys.Count -gt 0) { $allIds += $idsFromSys }
   } else { Warn "pslist.exe not found; using native fallback." }
   try {
@@ -201,6 +276,54 @@ function Stop-AppProcesses { param([Parameter(Mandatory)][string]$DisplayName)
   if ($allIds.Count -eq 0) { Info "No matching processes for '$DisplayName'."; return }
   Info "Terminating related Ids for '$DisplayName': $($allIds -join ', ')"
   Stop-IdsRobust -Ids $allIds
+}
+
+$mitmCA = "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.pem"
+$env:SSL_CERT_FILE = $mitmCA
+$env:REQUESTS_CA_BUNDLE = $mitmCA
+
+# --- helpers: start/stop mitmdump as a background process
+function Start-Mitmdump {
+    param(
+        [string]$OutFile,
+        [string]$Mode = "local",      # or "regular"
+        [string[]]$IgnoreHosts = @()
+    )
+
+    if (-not (Get-Command mitmdump -ErrorAction SilentlyContinue)) {
+        throw "mitmdump not found on PATH."
+    }
+
+    $args = @("--mode", $Mode, "-w", $OutFile)
+
+    foreach ($pat in $IgnoreHosts) {
+        $args += @("--ignore-hosts", $pat)  # <-- repeat flag per pattern
+    }
+
+    Start-Process -FilePath "mitmdump" -ArgumentList $args -WindowStyle Hidden -PassThru
+}
+
+
+function Stop-Mitmdump {
+    param([Parameter(Mandatory)]$Process)
+    if ($Process -and -not $Process.HasExited) {
+        Stop-Process -Id $Process.Id -Force
+        # tiny wait to ensure file is flushed
+        Start-Sleep -Milliseconds 250
+    }
+}
+
+# (Optional) enable/disable system proxy around the run (helps UWP/system apps use the proxy)
+function Enable-SystemProxy {
+    param([string]$Endpoint = "127.0.0.1:8080")
+    try {
+        netsh winhttp set proxy $Endpoint | Out-Null
+    } catch { Write-Warning "Couldn't set WinHTTP proxy: $($_.Exception.Message)" }
+}
+function Disable-SystemProxy {
+    try {
+        netsh winhttp reset proxy | Out-Null
+    } catch { Write-Warning "Couldn't reset WinHTTP proxy: $($_.Exception.Message)" }
 }
 
 # ---- main --------------------------------------------------------------------
@@ -228,18 +351,27 @@ foreach ($rawApp in $apps) {
 
   # Build UFO request; app should already be running now
   $request = @"
-Launch (if not already) the app '$displayName' and then do:
+Make sure '$displayName' on the foreground and then do:
 
 $common
 "@
-
-  Write-Host "Starting UFO for: $displayName"
-  # Important: pass a descriptive task AND the resolved name for search context
   python .\helpers\rec.py --grab gdigrab --cursor --out ".\rec\$($displayName -replace '[^a-zA-Z0-9]', '_').mp4"
+  $dumpFile = ".\netdump\$($displayName -replace '[^a-zA-Z0-9]', '_').mitm"
+  $mitmProc = Start-Mitmdump -OutFile $dumpFile -Mode local -IgnoreHosts @(
+    '(^|\.)generativelanguage\.googleapis\.com$',
+    '^192\.168\.68\.113:7861$'
+)
+
+  $startTime = Get-Date
+  Write-Host ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
   python -m ufo --task "$displayName" --request "$request"
   try { Stop-AppProcesses -DisplayName $displayName } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
+  Stop-Mitmdump -Process $mitmProc
+  Write-Host "Mitmdump stopped; output saved to $dumpFile"
+  $endTime = Get-Date
+  $elapsed = New-TimeSpan -Start $startTime -End $endTime
+  Write-Host ("Finished UFO for: {0} at {1} (elapsed {2})" -f $displayName, $endTime.ToString("yyyy-MM-dd HH:mm:ss"), $elapsed.ToString("hh\:mm\:ss"))
   python .\helpers\end_rec.py
-
   # Optional: you could scan UFO logs here to verify it interacted with the app,
   # and add to $failures if not detected.
 }
