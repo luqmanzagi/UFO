@@ -126,7 +126,7 @@ function Start-UWPAppByName([string]$preferredName, [ref]$resolvedStartApp) {
       Start-Sleep -Seconds 3
       return $true
     } catch {
-      Write-Warning "AUMID launch failed for '$($sa.Name)': $($_.Exception.Message)"
+      Warn "AUMID launch failed for '$($sa.Name)': $($_.Exception.Message)"
     }
   }
   return $false
@@ -138,7 +138,7 @@ function Fallback-StartMenuLaunch([string]$text) {
     Start-Sleep -Seconds 3
     return $true
   } catch {
-    Write-Warning "Fallback launcher failed: $($_.Exception.Message)"
+    Warn "Fallback launcher failed: $($_.Exception.Message)"
     return $false
   }
 }
@@ -197,7 +197,7 @@ function Get-RelatedIdsFromPsList {
             }
         }
     } catch {
-        Write-Warning "[WARN ] Get-RelatedIdsFromPsList failed: $($_.Exception.Message)"
+        Warn "Get-RelatedIdsFromPsList failed: $($_.Exception.Message)"
     }
 
     # Final guardrails: remove 0/negatives, dedupe, sort
@@ -211,7 +211,7 @@ function Stop-IdsRobust {
     param(
         [Parameter(Mandatory=$true)][object[]]$Ids,
         [string]$AppName = "",
-        [string]$PsKillPath = ".\helpers\pskill.exe",
+        [string]$PsKillPath = ".\helpers\pskill64.exe",
         [switch]$Tree
     )
 
@@ -229,11 +229,9 @@ function Stop-IdsRobust {
     $pidList = $pidList | Sort-Object -Unique
 
     if (-not $pidList -or $pidList.Count -eq 0) {
-        Write-Host "[INFO ] No related PIDs found to terminate for '$AppName'."
+        Warn "No related PIDs found to terminate for '$AppName'."
         return
     }
-
-    Write-Host "[INFO ] Terminating related Ids for '$AppName': $($pidList -join ', ')"
 
     try {
         if (Test-Path -LiteralPath $PsKillPath) {
@@ -241,31 +239,33 @@ function Stop-IdsRobust {
             if ($Tree.IsPresent) { $args += '-t' }
             $args += $pidList | ForEach-Object { "$_" }
 
-            Write-Host "[INFO ] $([IO.Path]::GetFileName($PsKillPath)) $($args -join ' ')"
+            Info "$([IO.Path]::GetFileName($PsKillPath)) $($args -join ' ')"
             $p = Start-Process -FilePath $PsKillPath -ArgumentList $args -NoNewWindow -PassThru -Wait -ErrorAction Stop
             if ($p.ExitCode -ne 0) {
-                Write-Warning "[WARN ] pskill exited with code $($p.ExitCode). Falling back to Stop-Process."
+                Warn "pskill exited with code $($p.ExitCode). Falling back to Stop-Process."
                 foreach ($single_pid in $pidList) {
-                    try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Write-Warning "[WARN ] Stop-Process($pid): $($_.Exception.Message)" }
+                    try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Warn "Stop-Process($pid): $($_.Exception.Message)" }
+                    Info "Stopped process Id $single_pid for '$AppName'."
                 }
             }
         } else {
             foreach ($single_pid in $pidList) {
-                try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Write-Warning "[WARN ] Stop-Process($pid): $($_.Exception.Message)" }
+                try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Warn "Stop-Process($pid): $($_.Exception.Message)" }
+                Info "Stopped process Id $single_pid for '$AppName'."
             }
         }
     } catch {
-        Write-Warning "[WARN ] Stop-IdsRobust failed: $($_.Exception.Message)"
+        Fail " Stop-IdsRobust failed: $($_.Exception.Message)"
     }
 }
 
 
 function Stop-AppProcesses { param([Parameter(Mandatory)][string]$DisplayName)
   $allIds = @()
-  if (Test-Path -LiteralPath ".\helpers\pslist.exe") {
+  if (Test-Path -LiteralPath ".\helpers\pslist64.exe") {
     $idsFromSys = Get-RelatedIdsFromPsList -Target $DisplayName
     if ($idsFromSys.Count -gt 0) { $allIds += $idsFromSys }
-  } else { Warn "pslist.exe not found; using native fallback." }
+  } else { Fail "pslist64.exe not found; using native fallback." }
   try {
     $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
       $_.Name -like "*$DisplayName*" -or $_.MainWindowTitle -like "*$DisplayName*"
@@ -275,7 +275,7 @@ function Stop-AppProcesses { param([Parameter(Mandatory)][string]$DisplayName)
   $allIds = $allIds | Sort-Object -Unique
   if ($allIds.Count -eq 0) { Info "No matching processes for '$DisplayName'."; return }
   Info "Terminating related Ids for '$DisplayName': $($allIds -join ', ')"
-  Stop-IdsRobust -Ids $allIds
+  Stop-IdsRobust -Ids $allIds -AppName $DisplayName
 }
 
 $mitmCA = "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.pem"
@@ -318,12 +318,12 @@ function Enable-SystemProxy {
     param([string]$Endpoint = "127.0.0.1:8080")
     try {
         netsh winhttp set proxy $Endpoint | Out-Null
-    } catch { Write-Warning "Couldn't set WinHTTP proxy: $($_.Exception.Message)" }
+    } catch { Warn "Couldn't set WinHTTP proxy: $($_.Exception.Message)" }
 }
 function Disable-SystemProxy {
     try {
         netsh winhttp reset proxy | Out-Null
-    } catch { Write-Warning "Couldn't reset WinHTTP proxy: $($_.Exception.Message)" }
+    } catch { Warn "Couldn't reset WinHTTP proxy: $($_.Exception.Message)" }
 }
 
 # ---- main --------------------------------------------------------------------
@@ -339,9 +339,9 @@ foreach ($rawApp in $apps) {
   $displayName = if ($resolved) { $resolved.Name } else { $storeName }
 
   if ($launched) {
-    Write-Host "Resolved '$storeName' -> Start menu app '$($resolved.Name)'; launched via AUMID."
+    Info "Resolved '$storeName' -> Start menu app '$($resolved.Name)'; launched via AUMID."
   } else {
-    Write-Host "Could not AUMID-launch '$storeName'. Fallback to Start-menu keystrokes..."
+    Warn "Could not AUMID-launch '$storeName'. Fallback to Start-menu keystrokes..."
     $aliasSet = Generate-Aliases $storeName
     # try a few best candidates (shortest first often matches Start search)
     foreach ($cand in ($aliasSet | Sort-Object Length)) {
@@ -363,21 +363,22 @@ $common
 )
 
   $startTime = Get-Date
-  Write-Host ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
+  Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
   python -m ufo --task "$displayName" --request "$request"
   try { Stop-AppProcesses -DisplayName $displayName } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
+  try { Stop-AppProcesses -DisplayName "msedge" } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
   Stop-Mitmdump -Process $mitmProc
-  Write-Host "Mitmdump stopped; output saved to $dumpFile"
+  Info "Mitmdump stopped; output saved to $dumpFile"
   $endTime = Get-Date
   $elapsed = New-TimeSpan -Start $startTime -End $endTime
-  Write-Host ("Finished UFO for: {0} at {1} (elapsed {2})" -f $displayName, $endTime.ToString("yyyy-MM-dd HH:mm:ss"), $elapsed.ToString("hh\:mm\:ss"))
+  Info ("Finished UFO for: {0} at {1} (elapsed {2})" -f $displayName, $endTime.ToString("yyyy-MM-dd HH:mm:ss"), $elapsed.ToString("hh\:mm\:ss"))
   python .\helpers\end_rec.py
   # Optional: you could scan UFO logs here to verify it interacted with the app,
   # and add to $failures if not detected.
 }
 
 if ($failures.Count -gt 0) {
-  Write-Warning "The following apps still failed: $($failures -join ', ')"
+  Warn "The following apps still failed: $($failures -join ', ')"
 } else {
   Write-Host "All done."
 }
