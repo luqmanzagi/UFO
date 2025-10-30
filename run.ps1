@@ -1,8 +1,8 @@
 # Requires: Windows PowerShell 5+ (or PowerShell 7) on Windows 10/11
 
 # ---- config / inputs ---------------------------------------------------------
-$appsFile = "app.txt"     # one app name per line (Store name)
-$genericFile = "simple.txt"     # optional extra prompt text
+$appsFile = "free_app_name_1.txt"     # one app name per line (Store name)
+$genericFile = "generic_time.txt"     # optional extra prompt text
 
 # ---- helper: write info/error conveniently ----------------------------------
 function Info($msg)  { Write-Host "[INFO ] $msg" -ForegroundColor Cyan }
@@ -37,7 +37,7 @@ if (-not (Test-Path -LiteralPath $netdumpDir)) {
 }
 
 # ---- helpers -----------------------------------------------------------------
-function Normalize-Name([string]$s) {
+function Set-NormalizeName([string]$s) {
   if ([string]::IsNullOrWhiteSpace($s)) { return "" }
   $t = $s.ToLowerInvariant()
   $t = ($t -replace '[®™©]', '')
@@ -46,7 +46,7 @@ function Normalize-Name([string]$s) {
   return $t
 }
 
-function Generate-Aliases([string]$name) {
+function Get-Aliases([string]$name) {
   $aliases = New-Object System.Collections.Generic.HashSet[string]
   if ([string]::IsNullOrWhiteSpace($name)) { return $aliases }
 
@@ -60,20 +60,20 @@ function Generate-Aliases([string]$name) {
   $aliases.Add(($name -replace '\(.*?\)', '').Trim()) | Out-Null
 
   # normalized originals
-  $aliases.Add((Normalize-Name $name)) | Out-Null
+  $aliases.Add((Set-NormalizeName $name)) | Out-Null
 
   # IMPORTANT: create a snapshot before adding more while iterating
   $snapshot = @()
   foreach ($it in $aliases) { $snapshot += $it }
 
   foreach ($a in $snapshot) {
-    $aliases.Add((Normalize-Name $a)) | Out-Null
+    $aliases.Add((Set-NormalizeName $a)) | Out-Null
   }
 
   # common shortener for "X: subtitle"
   if ($name -match '^(.+?):\s') {
     $aliases.Add($Matches[1]) | Out-Null
-    $aliases.Add((Normalize-Name $Matches[1])) | Out-Null
+    $aliases.Add((Set-NormalizeName $Matches[1])) | Out-Null
   }
 
   return $aliases
@@ -83,16 +83,16 @@ function Find-InstalledAppName([string]$targetName) {
   $startApps = Get-StartApps | Where-Object { $_.Name }
   $index = @{}
   foreach ($sa in $startApps) {
-    $norm = Normalize-Name $sa.Name
+    $norm = Set-NormalizeName $sa.Name
     if (-not $index.ContainsKey($norm)) { $index[$norm] = @() }
     $index[$norm] += ,$sa
   }
 
-  $candidates = Generate-Aliases $targetName
+  $candidates = Get-Aliases $targetName
 
   # exact normalized match
   foreach ($cand in $candidates) {
-    $norm = Normalize-Name $cand
+    $norm = Set-NormalizeName $cand
     if ($index.ContainsKey($norm)) {
       return ($index[$norm] | Select-Object -First 1)
     }
@@ -101,7 +101,7 @@ function Find-InstalledAppName([string]$targetName) {
   # fuzzy contains
   $allNorms = $index.Keys
   foreach ($cand in $candidates) {
-    $normCand = Normalize-Name $cand
+    $normCand = Set-NormalizeName $cand
     if (-not $normCand) { continue }
     $hits = $allNorms | Where-Object { $_ -like "*$normCand*" -or $normCand -like "*$_*" }
     if ($hits) {
@@ -132,7 +132,7 @@ function Start-UWPAppByName([string]$preferredName, [ref]$resolvedStartApp) {
   return $false
 }
 
-function Fallback-StartMenuLaunch([string]$text) {
+function Invoke-FallbackStartMenuLaunch([string]$text) {
   try {
     powershell -Command "$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys('^{ESC}'); Start-Sleep -m 900; $wshell.SendKeys('$text'); Start-Sleep -m 900; $wshell.SendKeys('{ENTER}')"
     Start-Sleep -Seconds 3
@@ -334,6 +334,12 @@ foreach ($rawApp in $apps) {
   if (-not $storeName) { continue }
 
   $resolved = $null
+  python .\helpers\rec.py --grab gdigrab --cursor --out ".\rec\$($storeName -replace '[^a-zA-Z0-9]', '_').mp4"
+  $dumpFile = ".\netdump\$($storeName -replace '[^a-zA-Z0-9]', '_').mitm"
+  $mitmProc = Start-Mitmdump -OutFile $dumpFile -Mode local -IgnoreHosts @(
+    '(^|\.)generativelanguage\.googleapis\.com$',
+    '^127\.0\.0\.1:7861$'
+  )
   $launched = Start-UWPAppByName $storeName ([ref]$resolved)
 
   $displayName = if ($resolved) { $resolved.Name } else { $storeName }
@@ -342,25 +348,19 @@ foreach ($rawApp in $apps) {
     Info "Resolved '$storeName' -> Start menu app '$($resolved.Name)'; launched via AUMID."
   } else {
     Warn "Could not AUMID-launch '$storeName'. Fallback to Start-menu keystrokes..."
-    $aliasSet = Generate-Aliases $storeName
+    $aliasSet = Get-Aliases $storeName
     # try a few best candidates (shortest first often matches Start search)
     foreach ($cand in ($aliasSet | Sort-Object Length)) {
-      if (Fallback-StartMenuLaunch $cand) { $displayName = $cand; break }
+      if (Invoke-FallbackStartMenuLaunch $cand) { $displayName = $cand; break }
     }
   }
 
   # Build UFO request; app should already be running now
   $request = @"
-Make sure '$displayName' on the foreground and then do:
+Bring the '$displayName' app to the front and then do:
 
 $common
 "@
-  python .\helpers\rec.py --grab gdigrab --cursor --out ".\rec\$($displayName -replace '[^a-zA-Z0-9]', '_').mp4"
-  $dumpFile = ".\netdump\$($displayName -replace '[^a-zA-Z0-9]', '_').mitm"
-  $mitmProc = Start-Mitmdump -OutFile $dumpFile -Mode local -IgnoreHosts @(
-    '(^|\.)generativelanguage\.googleapis\.com$',
-    '^192\.168\.68\.113:7861$'
-)
 
   $startTime = Get-Date
   Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
