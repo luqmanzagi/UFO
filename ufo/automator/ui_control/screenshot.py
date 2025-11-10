@@ -6,6 +6,7 @@ import functools
 import mimetypes
 import os
 from abc import ABC, abstractmethod
+import time
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
 
@@ -171,6 +172,30 @@ class PhotographerDecorator(Photographer):
         return relative_rect
 
 
+
+    def _get_window_rect_with_retry(self):
+        """Get window rectangle with retry + optional reattach."""
+        # initial attempt
+        try:
+            return self.photographer.control.rectangle()
+        except Exception:
+            pass
+        # retry loop using photographer hints if available
+        confirm_wait = float(getattr(getattr(self, 'photographer', None), '_confirm_wait_seconds', 5.0))
+        poll = float(getattr(getattr(self, 'photographer', None), '_poll_interval_seconds', 0.5))
+        deadline = time.time() + confirm_wait
+        while time.time() < deadline:
+            time.sleep(poll)
+            try:
+                if hasattr(self.photographer, '_try_refind_control'):
+                    try:
+                        self.photographer._try_refind_control()
+                    except Exception:
+                        pass
+                return self.photographer.control.rectangle()
+            except Exception:
+                continue
+        return None
 class RectangleDecorator(PhotographerDecorator):
     """
     Class to draw rectangles on the screenshot.
@@ -226,12 +251,19 @@ class RectangleDecorator(PhotographerDecorator):
             screenshot = Image.open(background_screenshot_path)
         else:
             screenshot = self.photographer.capture()
+        # If window rect still None after retries, we'll proceed without drawing per-control rectangles.
 
-        window_rect = self.photographer.control.rectangle()
+        window_rect = self._get_window_rect_with_retry()
 
         for control in self.sub_control_list:
             if control:
                 control_rect = control.rectangle()
+                if window_rect is None:
+
+                    # Window rect unavailable; skip annotation for this control
+
+                    continue
+
                 adjusted_rect = self.coordinate_adjusted(window_rect, control_rect)
                 screenshot = self.draw_rectangles(
                     screenshot, coordinate=adjusted_rect, color=self.color
@@ -259,6 +291,7 @@ class RectangleDecorator(PhotographerDecorator):
             screenshot = Image.open(background_screenshot_path)
         else:
             screenshot = self.photographer.capture()
+        # If window rect still None after retries, we'll proceed without drawing per-control rectangles.
 
         for control_adjusted_coord in control_adjusted_coords:
             if control_adjusted_coord:
