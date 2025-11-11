@@ -1,7 +1,7 @@
 # Requires: Windows PowerShell 5+ (or PowerShell 7) on Windows 10/11
 
 # ---- config / inputs ---------------------------------------------------------
-$appsFile = "free_app_name_1.txt"     # one app name per line (Store name)
+$appsFile = "app.txt"     # one app name per line (Store name)
 $genericFile = "generic_time.txt"     # optional extra prompt text
 
 # ---- helper: write info/error conveniently ----------------------------------
@@ -364,7 +364,7 @@ $common
 
   $startTime = Get-Date
   Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
-  python -m ufo --task "$displayName" --request "$request"
+  python -m ufo --task "$($displayName -replace ':', '')" --request "$request"
   try { Stop-AppProcesses -DisplayName $displayName } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
   try { Stop-AppProcesses -DisplayName "msedge" } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
   Stop-Mitmdump -Process $mitmProc
