@@ -14,8 +14,8 @@ GLOBAL RULES
 ====================
 SECRETS (FOR THIS SESSION)
 ====================
-secrets["app"].username = "X@google.com"
-secrets["app"].password = "ABC"
+secrets['app'].username = 'A.C@gmail.com '
+secrets['app'].password = 'ABC'
 
 ====================
 MAIN vs CHILD WINDOW DISAMBIGUATION
@@ -45,35 +45,74 @@ WINDOW HANDLING POLICY
 - **New window during RANDOM EXPLORE:** If a click opens a CHILD/overlay, **close that window next**, refocus **MAIN_WINDOW_HANDLE**, continue exploring.
 - **New window during LOGIN/SIGNUP:** If OAuth/verification opens a new window/webview, **complete that flow**, then return to MAIN. If 2FA/CAPTCHA is required, **Cancel/Back** and report “verification required—cannot proceed”.
 
+BROWSER AUTH HANDOFF — OAuth in external browser
+- If a login or SSO click opens a browser window or tab such as Edge, Chrome, Firefox, or WebView2, switch to the browser and complete the auth flow first, then return to the app.
+- Detection any of:
+  - Window title or URL mentions Google Sign in, accounts.google.com, Microsoft sign in, OAuth, Consent, Continue with Google
+  - Browser UI present such as address bar or tab strip or profile picker
+  - Process or window hints: msedge, chrome, firefox, webview, Edge, Chrome, Firefox in title
+- Focus and scope: Bring the browser to foreground and perform only required auth actions. Do not browse elsewhere.
+- Return rule: When success is indicated by redirect or all set page or auto close, close the auth tab or window and refocus MAIN_WINDOW_HANDLE.
+- If pop-ups were blocked: allow pop-up once and retry the SSO button.
+- If 2FA, CAPTCHA, or recovery appears: Cancel or Back and report verification required — cannot proceed.
+
 ====================
 DETECTION HEURISTICS
 ====================
-Treat as **Login** if ≥2 of: title contains login/sign-in/auth; fields Email/Username+Password; buttons Sign in/Next/Submit; SSO controls.
-Treat as **Google SSO** if a button/link says Google or webview hosts `accounts.google.com`.
-Treat as **Payment/Subscription** if: titles **Upgrade/Subscribe/Billing/Payment/Start Trial**; buttons **Buy/Subscribe/Start trial/Upgrade now/Checkout**; visible pricing/plan cards/card forms/wallets.
+- Login view if at least two of: title contains login or sign in or auth, fields Email or Username plus Password, buttons Sign in or Next or Submit, SSO controls.
+- Register or Sign up if: title contains create account or sign up or register or join, or form requests name, DOB, address.
+- Google SSO if a button or link says Google or the page hosts accounts.google.com.
+- Payment or Subscription if: titles Upgrade or Subscribe or Billing or Payment or Start Trial, buttons Buy or Subscribe or Start trial or Upgrade now or Checkout, visible pricing or plan cards or card forms or wallets.
+- Browser Auth surface if: title or URL mentions accounts.google.com or oauth or signin or consent, or the window class or process matches Edge or Chrome or Firefox or WebView2.
 
 ====================
 MODULES
 ====================
 
-LOGIN MODULE (reach main UI as signed-in user)
-1) If Google SSO exists → **GOOGLE LOGIN SUBMODULE**; else → **USERNAME/PASSWORD SUBMODULE**.
-2) If verification interstitial appears → **Skip/Remind me later/Continue**.
-3) If a **new login window/webview** opens, **complete it** (consent → **Allow**), then return to MAIN.
-4) If 2FA/CAPTCHA blocks progress → **Cancel/Back** and report.
-5) Confirm login success: navigation/toolbars/content present & no password fields/sign-in buttons.
+LOGIN MODULE — reach main UI as signed-in user
+Maintain login_attempt_count = 0.
 
-GOOGLE LOGIN SUBMODULE
-1) Click **Sign in with Google / Continue with Google**.
-2) In webview: Email = `secrets["app"].username` → **Next**; Password = `secrets["app"].password` (mask in logs) → **Next/Sign in**.
-3) Consent → **Allow**. Follow any spawned OAuth windows; return to MAIN.
-4) If 2FA/recovery appears → **Cancel/Back** and report.
+1) If Google SSO exists → run GOOGLE LOGIN SUBMODULE; else → run USERNAME or PASSWORD SUBMODULE.
+2) If clicking SSO or submit opens a new window or tab that is a browser auth surface → follow BROWSER AUTH HANDOFF until completion, then return to MAIN and re-check login state.
+3) On failure such as error banner, inline validation, or no transition after submit:
+   - Increment login_attempt_count and log any observed error text
+   - If login_attempt_count < 3, retry login, switching method if the previous path is broken
+   - If login_attempt_count > 2, run REGISTER MODULE
+4) Interstitials: prefer Skip or Remind me later or Continue when possible.
+5) If 2FA or CAPTCHA blocks progress: Cancel or Back and report verification required — cannot proceed.
+6) Success check: MAIN shows navigation or content and no password fields or sign-in buttons.
 
-USERNAME/PASSWORD SUBMODULE
-1) Email/Username = `secrets["app"].username`; Password = `secrets["app"].password` (mask in logs).
-2) Submit via **Sign in / Log in / Submit**.
-3) On “invalid credentials” or forced reset → report & abort.
-4) Confirm transition to main UI as above.
+GOOGLE LOGIN SUBMODULE — works in in-app webview or external browser
+1) Click Sign in with Google or Continue with Google.
+2) If an external browser opens: apply BROWSER AUTH HANDOFF and continue steps inside the browser.
+3) On Google page:
+   - Enter Email = secrets['app'].username → Next
+   - Enter Password = secrets['app'].password (mask in logs) → Next or Sign in
+   - If account picker appears, choose the account matching secrets['app'].username
+   - If consent appears, click Allow
+4) Wait for success redirect or auto-close. If not auto-closed, close the auth tab or window, then refocus MAIN_WINDOW_HANDLE.
+5) Re-check the app. If not signed in, retry once; otherwise proceed.
+6) If 2FA or recovery is requested: Cancel or Back and report verification required — cannot proceed.
+
+USERNAME or PASSWORD SUBMODULE
+1) Email or Username = secrets['app'].username; Password = secrets['app'].password (mask in logs)
+2) Submit via Sign in or Log in or Submit
+3) On invalid credentials or forced reset, record and count as a failed attempt
+
+REGISTER MODULE — trigger only after 2 failed logins
+Goal: create a new account and reach the main UI.
+
+1) Prefer Google SSO if available, same flow as GOOGLE LOGIN SUBMODULE, consent Allow when requested.
+2) Otherwise register with Email and Password using secrets['app'].username and secrets['app'].password:
+   - Name: First name = X, Last name = Y
+   - Date of birth: 1 Jan 1990, or 1990-01-01 for date pickers
+   - Address: a plausible random address in Nijmegen, Netherlands such as street name plus number, postcode starting with 65xx; do not use real payment details
+   - Additional fields: answer logically and minimally, country Netherlands, language English, phone optional skip if allowed
+3) Email confirmation:
+   - If optional: Skip or Remind me later or Continue
+   - If mandatory and blocks progress: Cancel or Back and report email verification required — cannot proceed
+4) If a new window or webview opens during registration, complete that flow and return to MAIN
+5) Confirm success: app transitions to main UI with navigation or content and no sign-in prompts
 
 ====================
 RANDOM EXPLORE MODULE (3 minutes)
@@ -101,7 +140,7 @@ Loop (until **3 minutes** elapsed):
 7) Log: control identity, result, any CHILD handled.
 
 Health checks:
-- If no view change after 5 selections, jump to a different area (tabs/sidebar in **MAIN**).
+- If no view change after 5 selections, jump to a different area such as tabs or sidebar in MAIN
 - If errors repeat or login reappears, stop and report.
 
 ====================
@@ -130,12 +169,11 @@ SELECT_MAIN_WINDOW() → set MAIN_WINDOW_HANDLE
 READ_UI_TREE()
 
 if DETECT_LOGIN_VIEW():
-    RUN(LOGIN_MODULE)
+    RUN(LOGIN MODULE)  # triggers REGISTER MODULE after 2 failed attempts
 
 if not IN_MAIN_VIEW():
     ABORT('Could not reach main UI')
-
-FOREGROUND_AND_VERIFY_MAIN()
+    
 RUN(RANDOM_EXPLORE_MODULE, minutes=3)
 
 RUN(CLOSE_MODULE)  # X → Alt+F4 → File→Exit; auto-handle confirmations with No/Don’t Save/Discard/Close/X
