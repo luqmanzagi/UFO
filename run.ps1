@@ -84,21 +84,22 @@ function Find-InstalledAppName([string]$targetName) {
   $index = @{}
   foreach ($sa in $startApps) {
     $norm = Set-NormalizeName $sa.Name
+    if (-not $norm) { continue }
     if (-not $index.ContainsKey($norm)) { $index[$norm] = @() }
     $index[$norm] += ,$sa
   }
 
   $candidates = Get-Aliases $targetName
 
-  # exact normalized match
+  # 1) exact normalized match
   foreach ($cand in $candidates) {
     $norm = Set-NormalizeName $cand
-    if ($index.ContainsKey($norm)) {
+    if ($norm -and $index.ContainsKey($norm)) {
       return ($index[$norm] | Select-Object -First 1)
     }
   }
 
-  # fuzzy contains
+  # 2) fuzzy "contains" match (your original behavior)
   $allNorms = $index.Keys
   foreach ($cand in $candidates) {
     $normCand = Set-NormalizeName $cand
@@ -107,6 +108,43 @@ function Find-InstalledAppName([string]$targetName) {
     if ($hits) {
       $best = ($hits | Sort-Object Length -Descending | Select-Object -First 1)
       return ($index[$best] | Select-Object -First 1)
+    }
+  }
+
+  # 3) NEW: word-overlap fallback to handle Store vs Start name differences
+  $normTarget = Set-NormalizeName $targetName
+  if ($normTarget -and $allNorms) {
+    $targetTokens = $normTarget -split ' '
+    $targetTokens = $targetTokens | Where-Object { $_ }  # drop empties
+    if ($targetTokens.Count -gt 0) {
+      $firstToken = $targetTokens[0]
+
+      $bestKey   = $null
+      $bestScore = 0
+
+      foreach ($normName in $allNorms) {
+        $appTokens = ($normName -split ' ') | Where-Object { $_ }
+        if (-not $appTokens) { continue }
+
+        # intersection of tokens
+        $intersection = $appTokens | Where-Object { $targetTokens -contains $_ }
+        $score = $intersection.Count
+
+        # small bonus if the "brand" (first token) matches
+        if ($firstToken -and ($intersection -contains $firstToken)) {
+          $score++
+        }
+
+        if ($score -gt $bestScore) {
+          $bestScore = $score
+          $bestKey   = $normName
+        }
+      }
+
+      # require at least 2 shared tokens to avoid silly matches
+      if ($bestKey -and $bestScore -ge 2) {
+        return ($index[$bestKey] | Select-Object -First 1)
+      }
     }
   }
 
@@ -366,7 +404,7 @@ $common
   Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
   python -m ufo --task "$($displayName -replace ':', '')" --request "$request"
   try { Stop-AppProcesses -DisplayName $displayName } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
-  try { Stop-AppProcesses -DisplayName "msedge" } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
+  # try { Stop-AppProcesses -DisplayName "msedge" } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
   Stop-Mitmdump -Process $mitmProc
   Info "Mitmdump stopped; output saved to $dumpFile"
   $endTime = Get-Date
