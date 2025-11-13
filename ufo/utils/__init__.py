@@ -417,3 +417,34 @@ def save_image_string(image_string: str, save_path: str) -> Image.Image:
         except Exception:
             # Return a minimal 1x1 pixel image in memory
             return Image.new("RGB", (1, 1), color="white")
+
+def parse_duration_to_seconds(text: str) -> int:
+    """Parse a simple 'for X <units>' duration from free text.
+    Returns seconds (int). Supports hours, minutes, seconds.
+    Examples: 'for 1 minute', 'for 90s', 'for 1.5 hours', 'for 2 mins'.
+    """
+    if not text:
+        return 0
+    import re
+    pattern = re.compile(
+        r"\bfor\s+(\d+(?:[\.,]\d+)?)\s*(?:(hours?|hrs?|hr|h)|(minutes?|mins?|min|m)|(seconds?|secs?|sec|s))\b",
+        re.IGNORECASE,
+    )
+    m = pattern.search(text)
+    if not m:
+        return 0
+    # Normalize number (handle comma as decimal separator too)
+    num_str = m.group(1).replace(',', '.')
+    try:
+        value = float(num_str)
+    except ValueError:
+        return 0
+    if m.group(2):  # hours
+        seconds = int(round(value * 3600))
+    elif m.group(3):  # minutes
+        seconds = int(round(value * 60))
+    elif m.group(4):  # seconds
+        seconds = int(round(value))
+    else:
+        seconds = 0
+    return max(0, seconds)

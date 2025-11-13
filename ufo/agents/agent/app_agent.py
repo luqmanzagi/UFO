@@ -8,6 +8,8 @@ import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
+import time
+import asyncio
 
 import openai
 from rich.console import Console
@@ -31,6 +33,7 @@ from config.config_loader import get_ufo_config
 from aip.messages import Command, MCPToolInfo
 from ufo.module import interactor
 from ufo.module.context import Context, ContextNames
+from ufo.utils import parse_duration_to_seconds
 from ufo.prompter.agent_prompter import AppAgentPrompter
 
 console = Console()
@@ -367,9 +370,68 @@ class AppAgent(BasicAgent):
 
     async def process(self, context: Context) -> None:
         """
-        Process the agent.
-        :param context: The context.
+        Run one AppAgent step with built-in wall-clock timer support.
+
+        The timer is initialised from the natural-language request / subtask
+        (e.g. "for 20 seconds", "for 1 minute") and stored in the shared
+        Context so HostAgent / EvaluationAgent can inspect it.
         """
+
+        # ────────────────────────────── 1) TIMER BOOTSTRAP ──────────────────────────────
+        # Only initialise once per task, and only if a duration can be parsed.
+        limit_seconds = context.get(ContextNames.TIMER_LIMIT_SECONDS)
+
+        if not limit_seconds or int(limit_seconds) == 0:
+            # Build a source text from REQUEST + SUBTASK for duration parsing
+            source_parts = []
+
+            req = context.get(ContextNames.REQUEST)
+            if req:
+                source_parts.append(str(req))
+
+            sub = context.get(ContextNames.SUBTASK)
+            if sub:
+                source_parts.append(str(sub))
+
+            source_text = " ".join(source_parts)
+
+            try:
+                parsed = parse_duration_to_seconds(source_text)
+            except Exception:
+                parsed = 0
+
+            if parsed and parsed > 0:
+                now = time.monotonic()
+                context.set(ContextNames.TIMER_LIMIT_SECONDS, int(parsed))
+                context.set(ContextNames.TIMER_START_MONOTONIC, now)
+                context.set(ContextNames.TIMER_DEADLINE_MONOTONIC, now + float(parsed))
+                self.logger.info(f"⏱️ Timer initialised: {parsed} seconds")
+
+        # Pull timer values (may still be None if no duration was found)
+        deadline = context.get(ContextNames.TIMER_DEADLINE_MONOTONIC)
+        start = context.get(ContextNames.TIMER_START_MONOTONIC)
+
+        # ────────────────────────────── 2) PRE-STEP GUARD ───────────────────────────────
+        # If the deadline has already passed before doing anything else, we stop.
+        if deadline and start and time.monotonic() >= float(deadline):
+            elapsed = int(round(time.monotonic() - float(start)))
+            context.set(ContextNames.TIMER_ELAPSED_SECONDS, elapsed)
+            context.set(ContextNames.TIMER_DURATION_SATISFIED, True)
+
+            self.logger.info("⏱️ Time limit reached (pre-step); finishing AppAgent.")
+            console.print("⏱️ Time limit reached; finishing AppAgent.", style="red")
+            self.status = AppAgentStatus.FINISH.value
+            return
+
+        # ────────────────────────────── 3) DISPLAY REMAINING TIME ──────────────────────
+        if deadline and start:
+            remaining = max(0.0, float(deadline) - time.monotonic())
+            mins, secs = divmod(int(round(remaining)), 60)
+            msg = f"⏳ Time remaining: {mins:02d}:{secs:02d}"
+            self.logger.info(msg)
+            console.print(msg, style="yellow")
+
+        # ────────────────────────────── 4) NORMAL APPAGENT LOGIC ───────────────────────
         if not self._context_provision_executed:
             await self.context_provision(context=context)
             self._context_provision_executed = True
@@ -382,7 +444,43 @@ class AppAgent(BasicAgent):
         )
         await self.processor.process()
 
-        self.status = self.processor.processing_context.get_local("status")
+        # ────────────────────────────── 5) POST-STEP GUARD ─────────────────────────────
+        # If time expired during this step, record it and force FINISH.
+        deadline = context.get(ContextNames.TIMER_DEADLINE_MONOTONIC)
+        start = context.get(ContextNames.TIMER_START_MONOTONIC)
+
+        if deadline and start and time.monotonic() >= float(deadline):
+            elapsed = int(round(time.monotonic() - float(start)))
+            context.set(ContextNames.TIMER_ELAPSED_SECONDS, elapsed)
+            context.set(ContextNames.TIMER_DURATION_SATISFIED, True)
+
+            self.logger.info("⏱️ Time limit reached (post-step); finishing AppAgent.")
+            console.print("⏱️ Time limit reached; finishing AppAgent.", style="red")
+            self.status = AppAgentStatus.FINISH.value
+            return
+
+        # ────────────────────────────── 6) STATUS DECISION ─────────────────────────────
+        # IMPORTANT:
+        #  - If a duration was requested AND we haven't hit the deadline yet,
+        #    we *force* CONTINUE so the agent keeps stepping until the timer expires.
+        #  - Only after the deadline is passed do we respect the processor's status.
+        llm_status = self.processor.processing_context.get_local("status")
+
+        limit_seconds = context.get(ContextNames.TIMER_LIMIT_SECONDS)
+        if limit_seconds and deadline and start:
+            now = time.monotonic()
+            if now < float(deadline):
+                # Still time left → ignore LLM "FINISH" and keep going.
+                self.logger.info(
+                    f"⏱️ Timer not yet satisfied "
+                    f"({int(round(float(deadline) - now))}s remaining); forcing CONTINUE."
+                )
+                self.status = AppAgentStatus.CONTINUE.value
+                return
+
+        # No active timer, or timer already satisfied → honour LLM decision
+        self.status = llm_status
+
 
     def process_confirmation(self) -> bool:
         """

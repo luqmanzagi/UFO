@@ -63,6 +63,12 @@ class ContextNames(Enum):
     APPLICATION_WINDOW_INFO = (
         "APPLICATION_WINDOW_INFO"  # The information of the application window
     )
+    TIMER_ELAPSED_SECONDS = "timer_elapsed_seconds"
+    TIMER_DURATION_SATISFIED = "timer_duration_satisfied"
+    TIMER_LIMIT_SECONDS = "TIMER_LIMIT_SECONDS"  # Max allowed duration (seconds)
+    TIMER_START_MONOTONIC = "TIMER_START_MONOTONIC"  # Monotonic start time
+    TIMER_DEADLINE_MONOTONIC = "TIMER_DEADLINE_MONOTONIC"  # Monotonic deadline
+
 
     TOOL_INFO = "TOOL_INFO"  # The information of the tools
 
@@ -132,6 +138,13 @@ class ContextNames(Enum):
                 return WeavingMode.CREATION
             except ImportError:
                 return "creation"  # Fallback string value
+        
+        elif self == ContextNames.TIMER_LIMIT_SECONDS:
+            return 0
+        elif (
+            self == ContextNames.TIMER_START_MONOTONIC
+            or self == ContextNames.TIMER_DEADLINE_MONOTONIC):
+            return 0.0
         else:
             return None
 
