@@ -1,8 +1,8 @@
 # UFO System Configuration
 
 # LLM Parameters
-MAX_TOKENS: 2000  # The max token limit for the response completion
-MAX_RETRY: 20  # The max retry limit for the response completion
+MAX_TOKENS: 8192  # The max token limit for the response completion
+MAX_RETRY: 5  # The max retry limit for the response completion
 TEMPERATURE: 0.0  # The temperature of the model: the lower the value, the more consistent
 TOP_P: 0.0  # The top_p of the model: the lower the value, the more conservative
 TIMEOUT: 60  # The call timeout(s), default is 1 mins
@@ -12,7 +12,7 @@ CONTROL_BACKEND: ["uia"]  # The backend for control action: uia, omniparser
 IOU_THRESHOLD_FOR_MERGE: 0.1  # The iou threshold for merging the boxes between controls
 
 # Execution Limits
-MAX_STEP: 50  # The max step limit for completing the user request
+MAX_STEP: 20  # The max step limit for completing the user request
 MAX_ROUND: 1  # The max round limit for completing the user request
 SLEEP_TIME: 1  # The sleep time between each step to wait for the window to be ready
 RECTANGLE_TIME: 1

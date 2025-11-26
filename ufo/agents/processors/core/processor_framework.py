@@ -189,6 +189,64 @@ class ProcessorTemplate(ABC):
         """
         return {}
 
+    def _enforce_time_limits(self) -> None:
+        """
+        Enforce time limits by checking timers and overriding agent status if needed.
+        This ensures timers are enforced regardless of LLM decisions.
+        """
+        try:
+            from ufo.agents.processors.utils import TaskPhase
+            from rich.console import Console
+            from rich.panel import Panel
+            from rich.text import Text
+            
+            console = Console()
+            
+            timer_manager = self.processing_context.get_global("timer_manager")
+            if not timer_manager:
+                return
+            
+            active_phase = timer_manager.get_active_phase()
+            if active_phase and not timer_manager.should_continue_phase(active_phase):
+                self.logger.warning(
+                    f"⏰ TIMER ENFORCEMENT: {active_phase.value} phase expired. "
+                    f"Forcing agent status to FINISH."
+                )
+                # Print timer enforcement to console
+                timer_text = Text()
+                timer_text.append("⏰ ", style="bold red")
+                timer_text.append("FINAL TIMER CHECK: ", style="bold red")
+                timer_text.append(f"{active_phase.value.upper()}", style="red")
+                timer_text.append(" phase expired. ", style="red")
+                timer_text.append("Agent status forced to FINISH.", style="bold yellow")
+                console.print(Panel(timer_text, title="[bold red]Timer Enforcement[/bold red]", border_style="red"))
+                # Override agent status to force state transition
+                self.agent.status = "FINISH"
+                # Also update context status
+                self.processing_context.set_local("status", "FINISH")
+                # Stop the expired constraint
+                timer_manager.stop_constraint(active_phase)
+                
+                # Check if there are more phases to execute
+                if active_phase == TaskPhase.RANDOM_CLICKING:
+                    # Check if timed action should start next
+                    if timer_manager.is_phase_active(TaskPhase.TIMED_ACTION):
+                        self.logger.info("Will transition to TIMED_ACTION phase in next step")
+                        transition_text = Text()
+                        transition_text.append("➡️ ", style="bold cyan")
+                        transition_text.append("Next Phase: ", style="cyan")
+                        transition_text.append("TIMED_ACTION", style="bold cyan")
+                        console.print(Panel(transition_text, title="[bold cyan]Phase Transition[/bold cyan]", border_style="cyan"))
+                    elif timer_manager.is_phase_active(TaskPhase.CLOSE_APP):
+                        self.logger.info("Will transition to CLOSE_APP phase in next step")
+                        transition_text = Text()
+                        transition_text.append("➡️ ", style="bold cyan")
+                        transition_text.append("Next Phase: ", style="cyan")
+                        transition_text.append("CLOSE_APP", style="bold cyan")
+                        console.print(Panel(transition_text, title="[bold cyan]Phase Transition[/bold cyan]", border_style="cyan"))
+        except Exception as e:
+            self.logger.warning(f"Error enforcing time limits: {e}")
+
     def _finalize_processing_context(
         self, processing_context: ProcessingContext
     ) -> None:
@@ -406,6 +464,9 @@ class ProcessorTemplate(ABC):
 
             # Decide what data needs to be promoted to global context
             self._finalize_processing_context(self.processing_context)
+            
+            # ENFORCE TIME LIMITS - Check timers after all strategies execute
+            self._enforce_time_limits()
 
             # Execute post-processing middleware
             for middleware in reversed(self.middleware_chain):

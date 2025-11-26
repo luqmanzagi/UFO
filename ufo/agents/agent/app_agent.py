@@ -21,6 +21,7 @@ from ufo import utils
 from ufo.agents.agent.basic import AgentRegistry, BasicAgent
 from ufo.agents.memory.blackboard import Blackboard
 from ufo.agents.processors.app_agent_processor import AppAgentProcessor
+from ufo.agents.processors.utils import TimerManager
 
 # from ufo.agents.processors.operator_processor import OpenAIOperatorProcessor
 from ufo.agents.processors.core.processor_framework import ProcessorTemplate
@@ -85,6 +86,10 @@ class AppAgent(BasicAgent):
         self.logger = logging.getLogger(__name__)
 
         self._processor: Optional[AppAgentProcessor] = None
+        
+        # Initialize timer manager for time-based task execution
+        # If this agent has a host, use the host's timer manager (shared instance)
+        self._timer_manager: Optional[TimerManager] = None
 
     def get_prompter(
         self,
@@ -382,7 +387,20 @@ class AppAgent(BasicAgent):
         )
         await self.processor.process()
 
+        # Get status from processor context (timer enforcement may have modified it)
         self.status = self.processor.processing_context.get_local("status")
+        
+        # Final timer check - if timer expired, override status regardless of LLM decision
+        if hasattr(self, 'timer_manager') and self.timer_manager:
+            from ufo.agents.processors.utils import TaskPhase
+            active_phase = self.timer_manager.get_active_phase()
+            if active_phase and not self.timer_manager.should_continue_phase(active_phase):
+                self.logger.warning(
+                    f"⏰ FINAL TIMER CHECK: {active_phase.value} phase expired. "
+                    f"Overriding agent status to FINISH."
+                )
+                self.status = "FINISH"
+                self.timer_manager.stop_constraint(active_phase)
 
     def process_confirmation(self) -> bool:
         """
@@ -552,6 +570,30 @@ class AppAgent(BasicAgent):
         :param tools: The list of MCPToolInfo objects.
         """
         self._tools_info = tools
+    
+    @property
+    def timer_manager(self) -> TimerManager:
+        """
+        Get the timer manager for time-based task execution.
+        If the agent has a host, use the host's timer manager (shared instance).
+        :return: The TimerManager instance.
+        """
+        if self._timer_manager is None:
+            # If this agent has a host, use the host's timer manager
+            if self.host and hasattr(self.host, 'timer_manager'):
+                self._timer_manager = self.host.timer_manager
+            else:
+                # Otherwise, create a new timer manager
+                self._timer_manager = TimerManager()
+        return self._timer_manager
+    
+    @timer_manager.setter
+    def timer_manager(self, timer_manager: TimerManager) -> None:
+        """
+        Set the timer manager.
+        :param timer_manager: The TimerManager instance to set.
+        """
+        self._timer_manager = timer_manager
 
 
 @AgentRegistry.register(agent_name="operator")

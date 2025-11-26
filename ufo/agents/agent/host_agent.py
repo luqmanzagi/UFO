@@ -19,6 +19,7 @@ from ufo.agents.agent.basic import AgentRegistry, BasicAgent
 from ufo.agents.memory.blackboard import Blackboard
 from ufo.agents.processors.host_agent_processor import HostAgentProcessor
 from ufo.agents.processors.schemas.response_schema import HostAgentResponse
+from ufo.agents.processors.utils import TimerManager
 from ufo.agents.states.host_agent_state import ContinueHostAgentState, HostAgentStatus
 from config.config_loader import get_ufo_config
 from aip.messages import Command, MCPToolInfo
@@ -176,6 +177,10 @@ class HostAgent(BasicAgent):
         self.set_state(self.default_state)
 
         self._context_provision_executed = False
+        
+        # Initialize timer manager for time-based task execution
+        # This timer manager will be shared with all app agents created by this host
+        self._timer_manager = TimerManager()
 
     def get_prompter(
         self,
@@ -354,6 +359,8 @@ class HostAgent(BasicAgent):
         app_agent = self.agent_factory.create_agent(**config)
         self.appagent_dict[agent_name] = app_agent
         app_agent.host = self
+        # Share the timer manager with the app agent
+        app_agent.timer_manager = self.timer_manager
         self._active_appagent = app_agent
 
         self.logger.info(
@@ -442,6 +449,27 @@ class HostAgent(BasicAgent):
         Get the default state.
         """
         return ContinueHostAgentState()
+    
+    @property
+    def timer_manager(self) -> TimerManager:
+        """
+        Get the timer manager for time-based task execution.
+        This timer manager is shared with all app agents created by this host.
+        :return: The TimerManager instance.
+        """
+        return self._timer_manager
+    
+    @timer_manager.setter
+    def timer_manager(self, timer_manager: TimerManager) -> None:
+        """
+        Set the timer manager.
+        :param timer_manager: The TimerManager instance to set.
+        """
+        self._timer_manager = timer_manager
+        # Update all existing app agents to use the new timer manager
+        for app_agent in self.appagent_dict.values():
+            if hasattr(app_agent, 'timer_manager'):
+                app_agent.timer_manager = timer_manager
 
     # if __name__ == "__main__":
     #     # Example usage of the HostAgent

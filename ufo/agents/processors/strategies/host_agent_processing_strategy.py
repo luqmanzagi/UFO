@@ -21,6 +21,10 @@ import json
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+
 from ufo import utils
 from ufo.agents.memory.memory import MemoryItem
 from ufo.agents.processors.context.host_agent_processing_context import (
@@ -45,6 +49,9 @@ from ufo.module.dispatcher import BasicCommandDispatcher
 
 # Load configuration
 ufo_config = get_ufo_config()
+
+# Initialize console for timer display
+console = Console()
 
 if TYPE_CHECKING:
     from ufo.agents.agent.host_agent import HostAgent
@@ -346,6 +353,29 @@ class HostLLMInteractionStrategy(BaseProcessingStrategy):
             host_agent = agent
             if not host_agent:
                 raise ValueError("Host agent not available")
+            
+            # Step 0.5: Parse time constraints from request and initialize timer manager
+            if hasattr(host_agent, 'timer_manager') and request:
+                timer_manager = host_agent.timer_manager
+                time_constraints = timer_manager.parse_time_constraints(request)
+                if time_constraints:
+                    # Print timer parsing results
+                    timer_text = Text()
+                    timer_text.append("⏰ ", style="bold yellow")
+                    timer_text.append("Parsed Time Constraints: ", style="yellow")
+                    timer_text.append(f"{len(time_constraints)} phase(s) found", style="cyan")
+                    console.print(Panel(timer_text, title="[bold yellow]Host Agent Timer[/bold yellow]", border_style="yellow"))
+                
+                for constraint in time_constraints:
+                    if not timer_manager.is_phase_active(constraint.phase):
+                        timer_manager.start_constraint(constraint)
+                        self.logger.info(
+                            f"HostAgent: Started time constraint: {constraint.phase.value} "
+                            f"for {constraint.duration_seconds}s"
+                        )
+                        # Timer start is already printed in timer_manager.start_constraint()
+                # Store timer manager in global context for app agents
+                context.set_global("timer_manager", timer_manager)
 
             # Step 1: Build comprehensive prompt message
             self.logger.info("Building prompt message with context")
