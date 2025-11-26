@@ -745,7 +745,8 @@ class AppLLMInteractionStrategy(BaseProcessingStrategy):
                 f"Collected {len(image_string_list)} screenshots for prompt."
             )
 
-            # Step 1.5: Parse time constraints from request/subtask and manage timers
+            # Step 1.5: Parse time constraints from request/subtask (but don't start yet)
+            # Timers will be started when AppAgent actually begins executing that phase
             request = context.get("request", "")
             full_prompt = f"{request} {subtask}" if subtask else request
             
@@ -765,22 +766,35 @@ class AppLLMInteractionStrategy(BaseProcessingStrategy):
                 self.timer_manager = timer_manager
                 context.set_global("timer_manager", timer_manager)
             
-            # Parse and start time constraints
+            # Parse time constraints and start the first phase timer when AppAgent begins the task
             time_constraints = timer_manager.parse_time_constraints(full_prompt)
-            for constraint in time_constraints:
-                if not timer_manager.is_phase_active(constraint.phase):
-                    timer_manager.start_constraint(constraint)
-                    self.logger.info(
-                        f"Started time constraint: {constraint.phase.value} "
-                        f"for {constraint.duration_seconds}s"
-                    )
-                    # Print timer start to console
-                    timer_text = Text()
-                    timer_text.append("⏰ ", style="bold yellow")
-                    timer_text.append(f"Timer Started: ", style="yellow")
-                    timer_text.append(f"{constraint.phase.value.upper()}", style="bold cyan")
-                    timer_text.append(f" for {constraint.duration_seconds:.1f} seconds", style="cyan")
-                    console.print(Panel(timer_text, title="[bold yellow]Timer Manager[/bold yellow]", border_style="yellow"))
+            if time_constraints:
+                self.logger.info(
+                    f"AppAgent: Parsed {len(time_constraints)} time constraints. "
+                    f"Starting first phase timer when AppAgent begins task."
+                )
+                # Start the first phase timer when AppAgent begins processing the task
+                # (not waiting for action execution)
+                next_phase = timer_manager.get_next_phase_to_start()
+                if next_phase:
+                    constraint = timer_manager.parsed_constraints.get(next_phase)
+                    if constraint:
+                        timer_manager.start_constraint(constraint)
+                        self.logger.info(
+                            f"AppAgent: Started timer for {next_phase.value} phase "
+                            f"when beginning task processing"
+                        )
+                        # Remove from parsed constraints since it's now active
+                        timer_manager.parsed_constraints.pop(next_phase, None)
+                        # Print timer start to console
+                        timer_text = Text()
+                        timer_text.append("⏰ ", style="bold yellow")
+                        timer_text.append("Timer Started: ", style="yellow")
+                        timer_text.append(f"{next_phase.value.upper()}", style="bold cyan")
+                        timer_text.append(f" for {constraint.duration_seconds:.1f} seconds", style="cyan")
+                        if constraint.action_description:
+                            timer_text.append(f" ({constraint.action_description})", style="dim cyan")
+                        console.print(Panel(timer_text, title="[bold yellow]AppAgent Timer[/bold yellow]", border_style="yellow"))
             
             # Step 2: Retrieve knowledge from the knowledge base
             self.logger.info("Retrieving knowledge from the knowledge base")
@@ -1303,6 +1317,22 @@ class AppActionExecutionStrategy(BaseProcessingStrategy):
                     phase=ProcessingPhase.ACTION_EXECUTION,
                 )
 
+            # START TIMERS - Start timer when AppAgent begins executing the task
+            if timer_manager and parsed_response.action:
+                # Check if there's a phase that should be started
+                next_phase = timer_manager.get_next_phase_to_start()
+                if next_phase:
+                    # Start the timer for this phase
+                    constraint = timer_manager.parsed_constraints.get(next_phase)
+                    if constraint:
+                        timer_manager.start_constraint(constraint)
+                        self.logger.info(
+                            f"AppAgent: Started timer for {next_phase.value} phase "
+                            f"when beginning task execution"
+                        )
+                        # Remove from parsed constraints since it's now active
+                        timer_manager.parsed_constraints.pop(next_phase, None)
+            
             # ENFORCE TIME LIMITS - Check timers before executing actions
             if timer_manager:
                 active_phase = timer_manager.get_active_phase()
@@ -1328,60 +1358,83 @@ class AppActionExecutionStrategy(BaseProcessingStrategy):
                         if phase != active_phase and phase != TaskPhase.NORMAL
                     ]
                     
-                    # If random clicking expired, check for next phase (timed action or close)
-                    if active_phase == TaskPhase.RANDOM_CLICKING:
-                        # Check if timed action phase should start
-                        if timer_manager.is_phase_active(TaskPhase.TIMED_ACTION):
-                            self.logger.info("Transitioning to TIMED_ACTION phase")
-                        elif timer_manager.is_phase_active(TaskPhase.CLOSE_APP):
-                            self.logger.info("Transitioning to CLOSE_APP phase")
+                    # When a phase expires, start the next phase if available
+                    next_phase = timer_manager.get_next_phase_to_start()
+                    if next_phase:
+                        # Start the next phase timer
+                        constraint = timer_manager.parsed_constraints.get(next_phase)
+                        if constraint:
+                            timer_manager.start_constraint(constraint)
+                            self.logger.info(f"Transitioning to {next_phase.value} phase")
+                            # Remove from parsed constraints since it's now active
+                            timer_manager.parsed_constraints.pop(next_phase, None)
+                            # Continue execution with the new phase - allow action to execute
+                            parsed_response.status = "CONTINUE"
+                            context.set_local("status", "CONTINUE")
+                            # Don't block action - allow it to execute for the new phase
                         else:
                             # No more phases, force FINISH
                             self.logger.info("All timed phases completed. Forcing FINISH status.")
                             parsed_response.status = "FINISH"
                             parsed_response.action = None
-                            # Set status in context to force round end
                             context.set_local("status", "FINISH")
-                    
-                    # If timed action expired, move to close app or finish
-                    elif active_phase == TaskPhase.TIMED_ACTION:
-                        if timer_manager.is_phase_active(TaskPhase.CLOSE_APP):
-                            self.logger.info("Transitioning to CLOSE_APP phase")
-                        else:
-                            self.logger.info("Timed action completed. Forcing FINISH status.")
-                            parsed_response.status = "FINISH"
-                            parsed_response.action = None
-                            context.set_local("status", "FINISH")
-                    
-                    # Don't execute action if timer expired
-                    if parsed_response.action:
-                        self.logger.warning("Blocking action execution - timer expired")
+                    else:
+                        # No more phases, force FINISH
+                        self.logger.info("All timed phases completed. Forcing FINISH status.")
+                        parsed_response.status = "FINISH"
                         parsed_response.action = None
+                        context.set_local("status", "FINISH")
                 
-                # If phase is still active, enforce phase-specific rules
-                elif active_phase == TaskPhase.RANDOM_CLICKING:
-                    if parsed_response.action:
-                        # Check if action is trying to close/minimize (should be filtered)
-                        action_args = parsed_response.action.arguments or {}
-                        control_id = action_args.get("id")
-                        if control_id and annotation_dict:
-                            control = annotation_dict.get(control_id)
-                            if control:
-                                phase_filter = ControlPhaseFilter()
-                                if phase_filter._is_window_chrome_control(control):
-                                    self.logger.warning(
-                                        f"Blocked attempt to click window chrome control: {control.name}"
-                                    )
-                                    # Modify response to skip this action
-                                    parsed_response.action = None
-                
-                elif active_phase == TaskPhase.CLOSE_APP:
-                    # During close app phase, ensure no confirmation is requested
-                    self.logger.info("In close app phase - closing without confirmation")
-                    # Override status to ensure we close
-                    if parsed_response.status == "CONFIRM":
+                # If phase is still active, enforce phase-specific rules and force CONTINUE if needed
+                elif active_phase:
+                    # Force CONTINUE if timer is active and LLM suggested FINISH
+                    if parsed_response.status == "FINISH" and timer_manager.should_continue_phase(active_phase):
+                        time_remaining = timer_manager.get_time_remaining(active_phase)
+                        self.logger.warning(
+                            f"⏰ TIMER ACTIVE: {active_phase.value} phase is still active "
+                            f"({time_remaining:.1f}s remaining). Overriding LLM status to CONTINUE."
+                        )
+                        # Print timer enforcement to console
+                        timer_text = Text()
+                        timer_text.append("⏰ ", style="bold yellow")
+                        timer_text.append("TIMER ACTIVE: ", style="bold yellow")
+                        timer_text.append(f"{active_phase.value.upper()}", style="bold cyan")
+                        timer_text.append(f" phase still active. ", style="yellow")
+                        timer_text.append(f"Remaining: {time_remaining:.1f}s. ", style="cyan")
+                        timer_text.append("Forcing CONTINUE.", style="bold green")
+                        console.print(Panel(timer_text, title="[bold yellow]Timer Enforcement[/bold yellow]", border_style="yellow"))
+                        # Override parsed response status
                         parsed_response.status = "CONTINUE"
-                        self.logger.info("Overrode CONFIRM status during close app phase")
+                        # Update context status
+                        context.set_local("status", "CONTINUE")
+                        # Update agent status directly
+                        agent.status = "CONTINUE"
+                        self.logger.info("Agent status set to CONTINUE due to active timer")
+                    
+                    # Enforce phase-specific rules
+                    if active_phase == TaskPhase.RANDOM_CLICKING:
+                        if parsed_response.action:
+                            # Check if action is trying to close/minimize (should be filtered)
+                            action_args = parsed_response.action.arguments or {}
+                            control_id = action_args.get("id")
+                            if control_id and annotation_dict:
+                                control = annotation_dict.get(control_id)
+                                if control:
+                                    phase_filter = ControlPhaseFilter()
+                                    if phase_filter._is_window_chrome_control(control):
+                                        self.logger.warning(
+                                            f"Blocked attempt to click window chrome control: {control.name}"
+                                        )
+                                        # Modify response to skip this action
+                                        parsed_response.action = None
+                    
+                    elif active_phase == TaskPhase.CLOSE_APP:
+                        # During close app phase, ensure no confirmation is requested
+                        self.logger.info("In close app phase - closing without confirmation")
+                        # Override status to ensure we close
+                        if parsed_response.status == "CONFIRM":
+                            parsed_response.status = "CONTINUE"
+                            self.logger.info("Overrode CONFIRM status during close app phase")
 
             # Execute the action
             execution_results = await self._execute_app_action(
@@ -1636,30 +1689,56 @@ class AppMemoryUpdateStrategy(BaseProcessingStrategy):
                 ContextNames.APPLICATION_PROCESS_NAME
             )
             
-            # ENFORCE TIME LIMITS - Check if timer expired and override status
+            # ENFORCE TIME LIMITS - Check timer status and override if needed
             timer_manager = context.get_global("timer_manager")
             if timer_manager and parsed_response:
                 active_phase = timer_manager.get_active_phase()
-                if active_phase and not timer_manager.should_continue_phase(active_phase):
-                    self.logger.warning(
-                        f"⏰ TIMER ENFORCEMENT: {active_phase.value} phase expired. "
-                        f"Forcing FINISH status and updating agent status."
-                    )
-                    # Print timer enforcement to console
-                    timer_text = Text()
-                    timer_text.append("⏰ ", style="bold red")
-                    timer_text.append("TIMER ENFORCEMENT: ", style="bold red")
-                    timer_text.append(f"{active_phase.value.upper()}", style="red")
-                    timer_text.append(" phase expired. ", style="red")
-                    timer_text.append("Forcing FINISH status.", style="bold yellow")
-                    console.print(Panel(timer_text, title="[bold red]Timer Enforcement[/bold red]", border_style="red"))
-                    # Override parsed response status
-                    parsed_response.status = "FINISH"
-                    # Update context status
-                    context.set_local("status", "FINISH")
-                    # Update agent status directly (this is what next_state() uses)
-                    agent.status = "FINISH"
-                    self.logger.info("Agent status set to FINISH due to timer expiration")
+                if active_phase:
+                    if not timer_manager.should_continue_phase(active_phase):
+                        # Timer expired - force FINISH
+                        self.logger.warning(
+                            f"⏰ TIMER ENFORCEMENT: {active_phase.value} phase expired. "
+                            f"Forcing FINISH status and updating agent status."
+                        )
+                        # Print timer enforcement to console
+                        timer_text = Text()
+                        timer_text.append("⏰ ", style="bold red")
+                        timer_text.append("TIMER ENFORCEMENT: ", style="bold red")
+                        timer_text.append(f"{active_phase.value.upper()}", style="red")
+                        timer_text.append(" phase expired. ", style="red")
+                        timer_text.append("Forcing FINISH status.", style="bold yellow")
+                        console.print(Panel(timer_text, title="[bold red]Timer Enforcement[/bold red]", border_style="red"))
+                        # Override parsed response status
+                        parsed_response.status = "FINISH"
+                        # Update context status
+                        context.set_local("status", "FINISH")
+                        # Update agent status directly (this is what next_state() uses)
+                        agent.status = "FINISH"
+                        self.logger.info("Agent status set to FINISH due to timer expiration")
+                    else:
+                        # Timer is still active - force CONTINUE if LLM suggested FINISH
+                        if parsed_response.status == "FINISH":
+                            time_remaining = timer_manager.get_time_remaining(active_phase)
+                            self.logger.warning(
+                                f"⏰ TIMER ACTIVE: {active_phase.value} phase is still active "
+                                f"({time_remaining:.1f}s remaining). Overriding LLM status to CONTINUE."
+                            )
+                            # Print timer enforcement to console
+                            timer_text = Text()
+                            timer_text.append("⏰ ", style="bold yellow")
+                            timer_text.append("TIMER ACTIVE: ", style="bold yellow")
+                            timer_text.append(f"{active_phase.value.upper()}", style="bold cyan")
+                            timer_text.append(f" phase still active. ", style="yellow")
+                            timer_text.append(f"Remaining: {time_remaining:.1f}s. ", style="cyan")
+                            timer_text.append("Forcing CONTINUE.", style="bold green")
+                            console.print(Panel(timer_text, title="[bold yellow]Timer Enforcement[/bold yellow]", border_style="yellow"))
+                            # Override parsed response status
+                            parsed_response.status = "CONTINUE"
+                            # Update context status
+                            context.set_local("status", "CONTINUE")
+                            # Update agent status directly
+                            agent.status = "CONTINUE"
+                            self.logger.info("Agent status set to CONTINUE due to active timer")
 
             # Step 1: Create additional memory data
             self.logger.info("Creating App Agent additional memory data")

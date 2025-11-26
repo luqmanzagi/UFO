@@ -354,26 +354,23 @@ class HostLLMInteractionStrategy(BaseProcessingStrategy):
             if not host_agent:
                 raise ValueError("Host agent not available")
             
-            # Step 0.5: Parse time constraints from request and initialize timer manager
+            # Step 0.5: Parse time constraints from request (but don't start timers yet)
+            # Timers will be started by AppAgent when it actually begins the task
             if hasattr(host_agent, 'timer_manager') and request:
                 timer_manager = host_agent.timer_manager
                 time_constraints = timer_manager.parse_time_constraints(request)
                 if time_constraints:
-                    # Print timer parsing results
+                    # Print timer parsing results (informational only)
                     timer_text = Text()
-                    timer_text.append("⏰ ", style="bold yellow")
-                    timer_text.append("Parsed Time Constraints: ", style="yellow")
+                    timer_text.append("⏱️ ", style="bold cyan")
+                    timer_text.append("Time Constraints Detected: ", style="cyan")
                     timer_text.append(f"{len(time_constraints)} phase(s) found", style="cyan")
-                    console.print(Panel(timer_text, title="[bold yellow]Host Agent Timer[/bold yellow]", border_style="yellow"))
-                
-                for constraint in time_constraints:
-                    if not timer_manager.is_phase_active(constraint.phase):
-                        timer_manager.start_constraint(constraint)
-                        self.logger.info(
-                            f"HostAgent: Started time constraint: {constraint.phase.value} "
-                            f"for {constraint.duration_seconds}s"
-                        )
-                        # Timer start is already printed in timer_manager.start_constraint()
+                    timer_text.append(" (will start when AppAgent begins task)", style="dim")
+                    console.print(Panel(timer_text, title="[bold cyan]Host Agent[/bold cyan]", border_style="cyan"))
+                    self.logger.info(
+                        f"HostAgent: Parsed {len(time_constraints)} time constraints from request. "
+                        f"Timers will start when AppAgent begins the task."
+                    )
                 # Store timer manager in global context for app agents
                 context.set_global("timer_manager", timer_manager)
 

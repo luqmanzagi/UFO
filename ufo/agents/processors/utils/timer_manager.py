@@ -72,6 +72,7 @@ class TimerManager:
     def __init__(self):
         """Initialize the timer manager."""
         self.active_constraints: Dict[TaskPhase, TimeConstraint] = {}
+        self.parsed_constraints: Dict[TaskPhase, TimeConstraint] = {}  # Parsed but not yet started
         self.logger = logging.getLogger(f"{__name__}.TimerManager")
     
     def parse_time_constraints(self, prompt: str) -> List[TimeConstraint]:
@@ -150,7 +151,31 @@ class TimerManager:
                 action_description="close app"
             ))
         
+        # Store parsed constraints for later starting
+        for constraint in constraints:
+            if constraint.phase not in self.parsed_constraints:
+                self.parsed_constraints[constraint.phase] = constraint
+        
         return constraints
+    
+    def get_next_phase_to_start(self) -> Optional[TaskPhase]:
+        """
+        Get the next phase that should be started (first phase that hasn't been started yet).
+        Phases are started in order: RANDOM_CLICKING -> TIMED_ACTION -> CLOSE_APP
+        
+        :return: The next TaskPhase to start, or None if all phases are active or started
+        """
+        phase_order = [TaskPhase.RANDOM_CLICKING, TaskPhase.TIMED_ACTION, TaskPhase.CLOSE_APP]
+        
+        for phase in phase_order:
+            # If phase is already active, skip it
+            if phase in self.active_constraints and self.active_constraints[phase].is_active():
+                continue
+            # If phase is parsed but not started, return it
+            if phase in self.parsed_constraints:
+                return phase
+        
+        return None
     
     def start_constraint(self, constraint: TimeConstraint) -> None:
         """
