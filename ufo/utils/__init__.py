@@ -11,7 +11,7 @@ import mimetypes
 import os
 import platform
 from typing import Optional, Any, Dict, Tuple, TYPE_CHECKING
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from colorama import Fore, Style, init
 
@@ -321,17 +321,22 @@ def load_image(image_path: str) -> Image.Image:
             logger.warning(f"Image file {image_path} does not exist.")
             return Image.new("RGB", (1, 1), color="white")
 
-        image = Image.open(image_path)
-
-        # Verify the image by accessing its properties
         try:
-            _ = image.size
-            _ = image.format
-            # Try to load the image data to ensure it's not corrupted
-            image.load()
-            return image
-        except Exception as e:
-            logger.warning(f"Image {image_path} appears to be corrupted: {e}")
+            image = Image.open(image_path)
+
+            # Verify the image by accessing its properties
+            try:
+                _ = image.size
+                _ = image.format
+                # Try to load the image data to ensure it's not corrupted
+                image.load()
+                return image
+            except Exception as e:
+                logger.warning(f"Image {image_path} appears to be corrupted: {e}")
+                return Image.new("RGB", (1, 1), color="white")
+
+        except UnidentifiedImageError:
+            logger.warning(f"Image {image_path} is unreadable (corrupted or wrong format). Returning blank placeholder.")
             return Image.new("RGB", (1, 1), color="white")
 
     except Exception as e:
