@@ -219,6 +219,16 @@ class EvaluationAgentPrompter(BasicPrompter):
             "Application": log.get("application_process_name"),
             # "Results": log.get("Results"),
         }
+        # Include timer information if present (so evaluation knows about timed tasks)
+        timer_phase = log.get("timer_phase")
+        timer_status = log.get("timer_status")
+        timer_remaining = log.get("timer_time_remaining")
+        timer_event = log.get("timer_event")
+        if timer_phase or timer_status or timer_remaining or timer_event:
+            step_trajectory["TimerPhase"] = timer_phase
+            step_trajectory["TimerStatus"] = timer_status
+            step_trajectory["TimerRemainingSeconds"] = timer_remaining
+            step_trajectory["TimerEvent"] = timer_event
 
         return step_trajectory
 

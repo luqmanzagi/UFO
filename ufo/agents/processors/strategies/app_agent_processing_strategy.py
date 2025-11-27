@@ -784,6 +784,13 @@ class AppLLMInteractionStrategy(BaseProcessingStrategy):
                             f"AppAgent: Started timer for {next_phase.value} phase "
                             f"when beginning task processing"
                         )
+                        # Record timer status for logging/evaluation purposes
+                        context.set_local("timer_status", "started")
+                        context.set_local("timer_event", "started_phase")
+                        context.set_local("timer_phase", next_phase.value)
+                        context.set_local(
+                            "timer_time_remaining", constraint.duration_seconds
+                        )
                         # Remove from parsed constraints since it's now active
                         timer_manager.parsed_constraints.pop(next_phase, None)
                         # Print timer start to console
@@ -810,6 +817,7 @@ class AppLLMInteractionStrategy(BaseProcessingStrategy):
             time_remaining = 0.0
             timer_info = ""
             if active_phase and timer_manager:
+                context.set_local("timer_phase", active_phase.value)
                 # Check if phase has expired before building prompt
                 if not timer_manager.should_continue_phase(active_phase):
                     self.logger.warning(
@@ -839,6 +847,10 @@ class AppLLMInteractionStrategy(BaseProcessingStrategy):
                     timer_text.append(f" | Time Remaining: ", style="yellow")
                     timer_text.append(f"{time_remaining:.1f}s", style="bold green" if time_remaining > 10 else "bold yellow" if time_remaining > 5 else "bold red")
                     console.print(Panel(timer_text, title="[bold yellow]Timer Status[/bold yellow]", border_style="yellow"))
+                    context.set_local("timer_status", "active")
+                    context.set_local("timer_event", "")
+                    context.set_local("timer_phase", active_phase.value)
+                    context.set_local("timer_time_remaining", time_remaining)
                     timer_info = (
                         f"\n[⏰ TIMER INFORMATION - ENFORCED]\n"
                         f"Current Phase: {active_phase.value}\n"
@@ -868,6 +880,25 @@ class AppLLMInteractionStrategy(BaseProcessingStrategy):
                             "'Discard', or click the X button to dismiss it.\n"
                         )
             
+            # Record timer status for logging/evaluation regardless of prompt text
+            if active_phase and timer_manager:
+                if timer_manager.should_continue_phase(active_phase):
+                    remaining = timer_manager.get_time_remaining(active_phase)
+                    context.set_local("timer_status", "active")
+                    context.set_local("timer_event", "")
+                    context.set_local("timer_phase", active_phase.value)
+                    context.set_local("timer_time_remaining", remaining)
+                else:
+                    context.set_local("timer_status", "expired")
+                    context.set_local("timer_event", "expired_before_llm")
+                    context.set_local("timer_phase", active_phase.value)
+                    context.set_local("timer_time_remaining", 0.0)
+            else:
+                context.set_local("timer_status", "none")
+                context.set_local("timer_event", "")
+                context.set_local("timer_phase", "")
+                context.set_local("timer_time_remaining", 0.0)
+
             prompt_message = await self._build_app_prompt(
                 agent=agent,
                 control_info=control_info,
@@ -1330,6 +1361,12 @@ class AppActionExecutionStrategy(BaseProcessingStrategy):
                             f"AppAgent: Started timer for {next_phase.value} phase "
                             f"when beginning task execution"
                         )
+                        context.set_local("timer_status", "started")
+                        context.set_local("timer_event", "started_phase")
+                        context.set_local("timer_phase", next_phase.value)
+                        context.set_local(
+                            "timer_time_remaining", constraint.duration_seconds
+                        )
                         # Remove from parsed constraints since it's now active
                         timer_manager.parsed_constraints.pop(next_phase, None)
             
@@ -1350,6 +1387,10 @@ class AppActionExecutionStrategy(BaseProcessingStrategy):
                     timer_text.append(f"{active_phase.value.upper()}", style="red")
                     timer_text.append(" phase has expired. Blocking actions.", style="red")
                     console.print(Panel(timer_text, title="[bold red]Timer Enforcement[/bold red]", border_style="red"))
+                    context.set_local("timer_status", "expired")
+                    context.set_local("timer_event", "expired_before_action")
+                    context.set_local("timer_phase", active_phase.value)
+                    context.set_local("timer_time_remaining", 0.0)
                     timer_manager.stop_constraint(active_phase)
                     
                     # Check if there are more phases to execute
@@ -1366,6 +1407,12 @@ class AppActionExecutionStrategy(BaseProcessingStrategy):
                         if constraint:
                             timer_manager.start_constraint(constraint)
                             self.logger.info(f"Transitioning to {next_phase.value} phase")
+                            context.set_local("timer_status", "started")
+                            context.set_local("timer_event", "started_phase")
+                            context.set_local("timer_phase", next_phase.value)
+                            context.set_local(
+                                "timer_time_remaining", constraint.duration_seconds
+                            )
                             # Remove from parsed constraints since it's now active
                             timer_manager.parsed_constraints.pop(next_phase, None)
                             # Continue execution with the new phase - allow action to execute
@@ -1407,6 +1454,10 @@ class AppActionExecutionStrategy(BaseProcessingStrategy):
                         parsed_response.status = "CONTINUE"
                         # Update context status
                         context.set_local("status", "CONTINUE")
+                        context.set_local("timer_status", "active")
+                        context.set_local("timer_event", "force_continue")
+                        context.set_local("timer_phase", active_phase.value)
+                        context.set_local("timer_time_remaining", time_remaining)
                         # Update agent status directly
                         agent.status = "CONTINUE"
                         self.logger.info("Agent status set to CONTINUE due to active timer")
@@ -1496,6 +1547,10 @@ class AppActionExecutionStrategy(BaseProcessingStrategy):
                         self.logger.warning(
                             f"⏰ Timer expired - overriding status to FINISH in action execution result"
                         )
+                        context.set_local("timer_status", "expired")
+                        context.set_local("timer_event", "expired_after_action")
+                        context.set_local("timer_phase", active_phase.value)
+                        context.set_local("timer_time_remaining", 0.0)
                         # Timer expired message already printed earlier
 
             return ProcessingResult(
@@ -1712,6 +1767,10 @@ class AppMemoryUpdateStrategy(BaseProcessingStrategy):
                         parsed_response.status = "FINISH"
                         # Update context status
                         context.set_local("status", "FINISH")
+                        context.set_local("timer_status", "expired")
+                        context.set_local("timer_event", "expired_during_memory")
+                        context.set_local("timer_phase", active_phase.value)
+                        context.set_local("timer_time_remaining", 0.0)
                         # Update agent status directly (this is what next_state() uses)
                         agent.status = "FINISH"
                         self.logger.info("Agent status set to FINISH due to timer expiration")
@@ -1736,9 +1795,20 @@ class AppMemoryUpdateStrategy(BaseProcessingStrategy):
                             parsed_response.status = "CONTINUE"
                             # Update context status
                             context.set_local("status", "CONTINUE")
+                            context.set_local("timer_status", "active")
+                            context.set_local("timer_event", "force_continue_memory")
+                            context.set_local("timer_phase", active_phase.value)
+                            context.set_local("timer_time_remaining", time_remaining)
                             # Update agent status directly
                             agent.status = "CONTINUE"
                             self.logger.info("Agent status set to CONTINUE due to active timer")
+                        else:
+                            # Timer still running; record status for logs/evaluation
+                            time_remaining = timer_manager.get_time_remaining(active_phase)
+                            context.set_local("timer_status", "active")
+                            context.set_local("timer_event", "")
+                            context.set_local("timer_phase", active_phase.value)
+                            context.set_local("timer_time_remaining", time_remaining)
 
             # Step 1: Create additional memory data
             self.logger.info("Creating App Agent additional memory data")

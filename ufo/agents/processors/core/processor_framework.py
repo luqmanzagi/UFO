@@ -224,6 +224,11 @@ class ProcessorTemplate(ABC):
                 self.agent.status = "FINISH"
                 # Also update context status
                 self.processing_context.set_local("status", "FINISH")
+                # Record timer info for logging/evaluation
+                self.processing_context.set_local("timer_status", "expired")
+                self.processing_context.set_local("timer_event", "final_enforcement")
+                self.processing_context.set_local("timer_phase", active_phase.value)
+                self.processing_context.set_local("timer_time_remaining", 0.0)
                 # Stop the expired constraint
                 timer_manager.stop_constraint(active_phase)
                 

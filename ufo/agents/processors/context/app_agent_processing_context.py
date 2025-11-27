@@ -89,6 +89,11 @@ class AppAgentProcessorContext(BasicProcessorContext):
     app_error_handler_active: bool = False  # Error handler status
     app_logging_active: bool = False  # Logging middleware status
     app_memory_sync_active: bool = False  # Memory sync middleware status
+    # Timer tracking (for timed tasks)
+    timer_phase: str = ""  # Active timer phase name
+    timer_status: str = ""  # e.g., active, expired, started, none
+    timer_time_remaining: float = 0.0  # Seconds remaining for current phase
+    timer_event: str = ""  # Last timer event (e.g., expired_before_llm, expired_during_action)
 
     @property
     def selected_keys(self) -> List[str]:
@@ -128,4 +133,9 @@ class AppAgentProcessorContext(BasicProcessorContext):
             "function_call",
             "save_screenshot",
             "control_log",
+            # Timer data (serialized for evaluation and debugging)
+            "timer_phase",
+            "timer_status",
+            "timer_time_remaining",
+            "timer_event",
         ]
