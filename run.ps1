@@ -1,13 +1,56 @@
 # Requires: Windows PowerShell 5+ (or PowerShell 7) on Windows 10/11
 
+# Set console output encoding to UTF-8 to handle Unicode characters (emojis, etc.)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+# Set console code page to UTF-8 (65001) to allow Windows console to display Unicode
+try {
+    chcp 65001 | Out-Null
+} catch {
+    # If chcp fails, continue anyway
+}
+
+# Set Python encoding to UTF-8 to handle Unicode characters in Python output
+$env:PYTHONIOENCODING = "utf-8"
+
 # ---- config / inputs ---------------------------------------------------------
 $appsFile = "app.txt"     # one app name per line (Store name)
 $genericFile = "generic_time_1m.txt"     # optional extra prompt text
 
 # ---- helper: write info/error conveniently ----------------------------------
-function Info($msg)  { Write-Host "[INFO ] $msg" -ForegroundColor Cyan }
-function Warn($msg)  { Write-Warning $msg }
-function Fail($msg)  { Write-Error $msg }
+# Global log file stream (will be set in main loop)
+$script:LogFileStream = $null
+
+function Info($msg) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logMsg = "[$timestamp] [INFO ] $msg"
+    Write-Host "[INFO ] $msg" -ForegroundColor Cyan
+    if ($script:LogFileStream) {
+        $script:LogFileStream.WriteLine($logMsg)
+        $script:LogFileStream.Flush()
+    }
+}
+
+function Warn($msg) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logMsg = "[$timestamp] [WARN ] $msg"
+    Write-Warning $msg
+    if ($script:LogFileStream) {
+        $script:LogFileStream.WriteLine($logMsg)
+        $script:LogFileStream.Flush()
+    }
+}
+
+function Fail($msg) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logMsg = "[$timestamp] [ERROR] $msg"
+    Write-Error $msg
+    if ($script:LogFileStream) {
+        $script:LogFileStream.WriteLine($logMsg)
+        $script:LogFileStream.Flush()
+    }
+}
 
 # ---- read files --------------------------------------------------------------
 if (-not (Test-Path $appsFile)) { throw "Missing apps file: $appsFile" }
@@ -34,6 +77,12 @@ if (-not (Test-Path -LiteralPath $recDir)) {
 $netdumpDir = Join-Path $baseDir 'netdump'
 if (-not (Test-Path -LiteralPath $netdumpDir)) {
     New-Item -ItemType Directory -Path $netdumpDir -Force | Out-Null
+}
+
+# Ensure .\log_terminal exists under the script (or current) directory
+$logTerminalDir = Join-Path $baseDir 'log_terminal'
+if (-not (Test-Path -LiteralPath $logTerminalDir)) {
+    New-Item -ItemType Directory -Path $logTerminalDir -Force | Out-Null
 }
 
 # ---- helpers -----------------------------------------------------------------
@@ -282,13 +331,13 @@ function Stop-IdsRobust {
             if ($p.ExitCode -ne 0) {
                 Warn "pskill exited with code $($p.ExitCode). Falling back to Stop-Process."
                 foreach ($single_pid in $pidList) {
-                    try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Warn "Stop-Process($pid): $($_.Exception.Message)" }
+                    try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Warn "Stop-Process($single_pid): $($_.Exception.Message)" }
                     Info "Stopped process Id $single_pid for '$AppName'."
                 }
             }
         } else {
             foreach ($single_pid in $pidList) {
-                try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Warn "Stop-Process($pid): $($_.Exception.Message)" }
+                try { Stop-Process -Id $single_pid -Force -ErrorAction Stop } catch { Warn "Stop-Process($single_pid): $($_.Exception.Message)" }
                 Info "Stopped process Id $single_pid for '$AppName'."
             }
         }
@@ -297,6 +346,80 @@ function Stop-IdsRobust {
     }
 }
 
+
+function Get-AllProcessIds {
+  <#
+    .SYNOPSIS
+      Returns all current process IDs as an array of integers.
+  #>
+  $pids = @()
+  try {
+    $procs = Get-Process -ErrorAction SilentlyContinue
+    foreach ($p in $procs) {
+      if ($p.Id -gt 0) {
+        $pids += [int]$p.Id
+      }
+    }
+  } catch {
+    Warn "Get-AllProcessIds failed: $($_.Exception.Message)"
+  }
+  return ($pids | Sort-Object -Unique)
+}
+
+function Stop-NewProcesses {
+  <#
+    .SYNOPSIS
+      Stops processes that were created after a baseline snapshot.
+    .PARAMETER BaselinePids
+      Array of process IDs that existed before the operation.
+    .PARAMETER ExcludePids
+      Array of process IDs to exclude from termination (e.g., our own tools).
+    .PARAMETER AppName
+      Name of the app for logging purposes.
+  #>
+  param(
+    [Parameter(Mandatory=$true)]
+    [int[]]$BaselinePids,
+    [int[]]$ExcludePids = @(),
+    [string]$AppName = ""
+  )
+  
+  try {
+    $currentPids = Get-AllProcessIds
+    $newPids = $currentPids | Where-Object { $BaselinePids -notcontains $_ }
+    
+    # Exclude specified PIDs (like mitmdump, our own scripts, etc.)
+    if ($ExcludePids.Count -gt 0) {
+      $newPids = $newPids | Where-Object { $ExcludePids -notcontains $_ }
+    }
+    
+    # Also exclude system processes and our own PowerShell/python processes
+    $excludeNames = @("powershell", "pwsh", "python", "mitmdump", "ffmpeg", "gdigrab")
+    $finalPids = @()
+    foreach ($processId in $newPids) {
+      try {
+        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($proc -and $excludeNames -notcontains $proc.ProcessName.ToLower()) {
+          $finalPids += $processId
+        }
+      } catch {
+        # Process may have already exited, skip it
+      }
+    }
+    
+    $finalPids = $finalPids | Sort-Object -Unique
+    
+    if ($finalPids.Count -eq 0) {
+      Info "No new processes to terminate for '$AppName'."
+      return
+    }
+    
+    Info "Terminating new process IDs for '$AppName': $($finalPids -join ', ')"
+    Stop-IdsRobust -Ids $finalPids -AppName $AppName
+  } catch {
+    Warn "Stop-NewProcesses failed: $($_.Exception.Message)"
+  }
+}
 
 function Stop-AppProcesses { param([Parameter(Mandatory)][string]$DisplayName)
   $allIds = @()
@@ -316,9 +439,9 @@ function Stop-AppProcesses { param([Parameter(Mandatory)][string]$DisplayName)
   Stop-IdsRobust -Ids $allIds -AppName $DisplayName
 }
 
-# $mitmCA = "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.pem"
-# $env:SSL_CERT_FILE = $mitmCA
-# $env:REQUESTS_CA_BUNDLE = $mitmCA
+$mitmCA = "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.pem"
+$env:SSL_CERT_FILE = $mitmCA
+$env:REQUESTS_CA_BUNDLE = $mitmCA
 
 # --- helpers: start/stop mitmdump as a background process
 function Start-Mitmdump {
@@ -371,21 +494,17 @@ foreach ($rawApp in $apps) {
   $storeName = $rawApp.Trim()
   if (-not $storeName) { continue }
 
-  $resolved = $null
-  python .\helpers\rec.py --grab gdigrab --cursor --out ".\rec\$($storeName -replace '[^a-zA-Z0-9]', '_').mp4"
-  # $dumpFile = ".\netdump\$($storeName -replace '[^a-zA-Z0-9]', '_').mitm"
-  # $mitmProc = Start-Mitmdump -OutFile $dumpFile -Mode local -IgnoreHosts @(
-  #   '(^|\.)generativelanguage\.googleapis\.com$',
-  #   '^127\.0\.0\.1:7861$'
-  # )
-  $launched = Start-UWPAppByName $storeName ([ref]$resolved)
+  # Capture baseline process IDs before launching the app
+  $baselinePids = Get-AllProcessIds
 
+  $resolved = $null
+  $launched = Start-UWPAppByName $storeName ([ref]$resolved)
   $displayName = if ($resolved) { $resolved.Name } else { $storeName }
 
   if ($launched) {
-    Info "Resolved '$storeName' -> Start menu app '$($resolved.Name)'; launched via AUMID."
+    # Info will be logged after log file is created
   } else {
-    Warn "Could not AUMID-launch '$storeName'. Fallback to Start-menu keystrokes..."
+    # Info will be logged after log file is created
     $aliasSet = Get-Aliases $storeName
     # try a few best candidates (shortest first often matches Start search)
     foreach ($cand in ($aliasSet | Sort-Object Length)) {
@@ -393,24 +512,145 @@ foreach ($rawApp in $apps) {
     }
   }
 
-  # Build UFO request; app should already be running now
-  $request = @"
+  # Setup log file (after final displayName is determined)
+  $logFileName = "$($displayName -replace '[^a-zA-Z0-9]', '_').log"
+  $logFilePath = Join-Path $logTerminalDir $logFileName
+  
+  # Open log file stream with UTF-8 encoding to handle Unicode characters (emojis, etc.)
+  try {
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $script:LogFileStream = [System.IO.StreamWriter]::new($logFilePath, $true, $utf8NoBom)
+    $script:LogFileStream.AutoFlush = $true
+    Info "Log file: $logFilePath"
+  } catch {
+    Write-Warning "Failed to create log file: $($_.Exception.Message)"
+    $script:LogFileStream = $null
+  }
+
+  try {
+    # Log the baseline capture and launch status now that log file is open
+    Info "Captured baseline process IDs: $($baselinePids.Count) processes running before app launch"
+    if ($launched) {
+      Info "Resolved '$storeName' -> Start menu app '$($resolved.Name)'; launched via AUMID."
+    } else {
+      Warn "Could not AUMID-launch '$storeName'. Used fallback to Start-menu keystrokes."
+    }
+
+    python .\helpers\rec.py --grab gdigrab --cursor --out ".\rec\$($storeName -replace '[^a-zA-Z0-9]', '_').mp4" 2>&1 | ForEach-Object {
+      Write-Host $_
+      if ($script:LogFileStream) {
+        try {
+          $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
+          $script:LogFileStream.WriteLine($logLine)
+          $script:LogFileStream.Flush()
+        } catch {
+          # If encoding fails, try to write a sanitized version
+          try {
+            $sanitized = $_ -replace '[^\x00-\x7F]', '?'
+            $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
+            $script:LogFileStream.Flush()
+          } catch {
+            # If even sanitized version fails, skip logging this line
+          }
+        }
+      }
+    }
+    
+    $dumpFile = ".\netdump\$($storeName -replace '[^a-zA-Z0-9]', '_').mitm"
+    $mitmProc = Start-Mitmdump -OutFile $dumpFile -Mode local -IgnoreHosts @(
+      '(^|\.)generativelanguage\.googleapis\.com$', '(^|\.)2cae493e80940e5707\.gradio\.live$'
+      # '^127\.0\.0\.1:7861$'
+    )
+
+    # Build UFO request; app should already be running now
+    $request = @"
 Bring the '$displayName' app to the front and then do:
 
 $common
 "@
 
-  $startTime = Get-Date
-  Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
-  python -m ufo --task "$($displayName -replace ':', '')" --request "$request"
-  # try { Stop-AppProcesses -DisplayName $displayName } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
-  # try { Stop-AppProcesses -DisplayName "msedge" } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
-  # Stop-Mitmdump -Process $mitmProc
-  Info "Mitmdump stopped; output saved to $dumpFile"
-  $endTime = Get-Date
-  $elapsed = New-TimeSpan -Start $startTime -End $endTime
-  Info ("Finished UFO for: {0} at {1} (elapsed {2})" -f $displayName, $endTime.ToString("yyyy-MM-dd HH:mm:ss"), $elapsed.ToString("hh\:mm\:ss"))
-  python .\helpers\end_rec.py
+    $startTime = Get-Date
+    Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
+    
+    python -m ufo --task "$($displayName -replace ':', '')" --request "$request" 2>&1 | ForEach-Object {
+      Write-Host $_
+      if ($script:LogFileStream) {
+        try {
+          $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
+          $script:LogFileStream.WriteLine($logLine)
+          $script:LogFileStream.Flush()
+        } catch {
+          # If encoding fails, try to write a sanitized version
+          try {
+            $sanitized = $_ -replace '[^\x00-\x7F]', '?'
+            $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
+            $script:LogFileStream.Flush()
+          } catch {
+            # If even sanitized version fails, skip logging this line
+          }
+        }
+      }
+    }
+    
+    # Stop new processes that appeared after baseline (excluding our own tools)
+    $excludePids = @()
+    try {
+      # Exclude mitmdump process
+      if ($mitmProc -and -not $mitmProc.HasExited) {
+        $excludePids += $mitmProc.Id
+      }
+      # Exclude current PowerShell process
+      $excludePids += $PID
+      # Exclude Python processes (rec.py, ufo, end_rec.py)
+      $pythonProcs = Get-Process python -ErrorAction SilentlyContinue
+      foreach ($p in $pythonProcs) {
+        $excludePids += $p.Id
+      }
+    } catch {
+      Warn "Failed to get exclude PIDs: $($_.Exception.Message)"
+    }
+    
+    try {
+      Stop-NewProcesses -BaselinePids $baselinePids -ExcludePids $excludePids -AppName $displayName
+    } catch {
+      Warn "Stop-NewProcesses errored: $($_.Exception.Message)"
+      # Fallback to old method if new method fails
+      try { Stop-AppProcesses -DisplayName $displayName } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
+    }
+    Stop-Mitmdump -Process $mitmProc
+    Info "Mitmdump stopped; output saved to $dumpFile"
+    $endTime = Get-Date
+    $elapsed = New-TimeSpan -Start $startTime -End $endTime
+    Info ("Finished UFO for: {0} at {1} (elapsed {2})" -f $displayName, $endTime.ToString("yyyy-MM-dd HH:mm:ss"), $elapsed.ToString("hh\:mm\:ss"))
+    
+    python .\helpers\end_rec.py 2>&1 | ForEach-Object {
+      Write-Host $_
+      if ($script:LogFileStream) {
+        try {
+          $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
+          $script:LogFileStream.WriteLine($logLine)
+          $script:LogFileStream.Flush()
+        } catch {
+          # If encoding fails, try to write a sanitized version
+          try {
+            $sanitized = $_ -replace '[^\x00-\x7F]', '?'
+            $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
+            $script:LogFileStream.Flush()
+          } catch {
+            # If even sanitized version fails, skip logging this line
+          }
+        }
+      }
+    }
+  } finally {
+    # Close log file stream for this app
+    if ($script:LogFileStream) {
+      $script:LogFileStream.Close()
+      $script:LogFileStream = $null
+      Write-Host "Log saved to: $logFilePath" -ForegroundColor Green
+    }
+  }
+  
   # Optional: you could scan UFO logs here to verify it interacted with the app,
   # and add to $failures if not detected.
 }
