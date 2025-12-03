@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import os
+
 from ufo.llm.base import BaseService
 from gradio_client import Client, handle_file
 
@@ -15,7 +17,10 @@ class OmniParser(BaseService):
         Initialize the OmniParser service.
         :param endpoint: The endpoint address of the OmniParser service.
         """
-        self.client = Client(endpoint)
+        verify_env = os.getenv("OMNIPARSER_SSL_VERIFY", "true").lower()
+        ssl_verify = {"false", "0", "no"}.isdisjoint({verify_env})
+        ca_bundle = os.getenv("OMNIPARSER_CA_BUNDLE")
+        self.client = Client(endpoint, ssl_verify=ca_bundle or ssl_verify)
 
     def chat_completion(
         self,
