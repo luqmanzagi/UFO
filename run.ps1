@@ -461,6 +461,10 @@ function Start-Mitmdump {
         $args += @("--ignore-hosts", $pat)  # <-- repeat flag per pattern
     }
 
+    Info ("Start-Process mitmdump " + (( $args | ForEach-Object {
+      '"' + ($_ -replace '"','""') + '"'
+  }) -join ' '))
+  
     Start-Process -FilePath "mitmdump" -ArgumentList $args -WindowStyle Hidden -PassThru
 }
 
@@ -558,7 +562,7 @@ foreach ($rawApp in $apps) {
     
     $dumpFile = ".\netdump\$($storeName -replace '[^a-zA-Z0-9]', '_').mitm"
     $mitmProc = Start-Mitmdump -OutFile $dumpFile -Mode local -IgnoreHosts @(
-      '(^|\.)generativelanguage\.googleapis\.com$', '(^|\.)2cae493e80940e5707\.gradio\.live$'
+      '(^|\.)generativelanguage\.googleapis\.com$', '(^|\.)gradio\.live$'
       # '^127\.0\.0\.1:7861$'
     )
 
