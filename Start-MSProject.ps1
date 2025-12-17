@@ -1,7 +1,7 @@
 # Requires: Windows PowerShell 5+ (or PowerShell 7) on Windows 10/11
 # Usage: .\msproject.ps1
 # This script reads applications from app.txt and runs Invoke-SingleUFO.ps1 for each one
-# In parallel with Get-ProcessBreakdown.ps1, which is stopped when Invoke-SingleUFO.ps1 completes
+# In parallel with scripts/getProcess.py, which is stopped when Invoke-SingleUFO.ps1 completes
 
 # Set console output encoding to UTF-8 to handle Unicode characters (emojis, etc.)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -74,15 +74,15 @@ $baseDir = if ($PSCommandPath) {
 
 $scriptsDir = Join-Path $baseDir "scripts"
 $singleRunScript = Join-Path $scriptsDir "Invoke-SingleUFO.ps1"
-$processBreakdownScript = Join-Path $scriptsDir "Get-ProcessBreakdown.ps1"
+$processCaptureScript = Join-Path $scriptsDir "getProcess.py"
 
 if (-not (Test-Path -LiteralPath $singleRunScript)) {
     Write-Error "Invoke-SingleUFO.ps1 not found at: $singleRunScript"
     exit 1
 }
 
-if (-not (Test-Path -LiteralPath $processBreakdownScript)) {
-    Write-Error "Get-ProcessBreakdown.ps1 not found at: $processBreakdownScript"
+if (-not (Test-Path -LiteralPath $processCaptureScript)) {
+    Write-Error "getProcess.py not found at: $processCaptureScript"
     exit 1
 }
 
@@ -115,23 +115,25 @@ foreach ($rawApp in $apps) {
     Write-Info "Waiting 1 second before starting parallel execution..."
     Start-Sleep -Seconds 1
 
-    $processBreakdownProc = $null
+    $processCaptureProc = $null
     
     try {
         # Convert baseline PIDs array to comma-separated string for passing as argument
         $baselinePidsString = $baselinePids -join ','
         
-        # Start Get-ProcessBreakdown.ps1 as a background process with baseline PIDs
-        Write-Info "Starting Get-ProcessBreakdown.ps1 for '$storeName' in background..."
-        $processBreakdownProc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$processBreakdownScript`"", "-ApplicationName", "`"$storeName`"", "-BaselinePids", $baselinePidsString `
+        # Start getProcess.py as a background process with baseline PIDs excluded
+        Write-Info "Starting getProcess.py for '$storeName' in background..."
+        $processCaptureArgs = @("`"$processCaptureScript`"", "--app-name", "`"$storeName`"", "--exclude-pids", "`"$baselinePidsString`"")
+        $processCaptureProc = Start-Process -FilePath "python.exe" `
+            -ArgumentList $processCaptureArgs `
             -PassThru `
-            -WindowStyle Hidden
+            -WindowStyle Hidden `
+            -WorkingDirectory $scriptsDir
         
-        if (-not $processBreakdownProc) {
-            Write-Warn "Failed to start Get-ProcessBreakdown.ps1 for '$storeName'"
+        if (-not $processCaptureProc) {
+            Write-Warn "Failed to start getProcess.py for '$storeName'"
         } else {
-            Write-Info "Get-ProcessBreakdown.ps1 started (PID: $($processBreakdownProc.Id))"
+            Write-Info "getProcess.py started (PID: $($processCaptureProc.Id))"
             # Give it a moment to start up
             Start-Sleep -Milliseconds 500
         }
@@ -150,17 +152,17 @@ foreach ($rawApp in $apps) {
         Write-Error "Failed to run Invoke-SingleUFO.ps1 for '$storeName': $($_.Exception.Message)"
         $failures += $storeName
     } finally {
-        # Stop Get-ProcessBreakdown.ps1 when single_run.ps1 finishes
-        if ($processBreakdownProc -and -not $processBreakdownProc.HasExited) {
-            Write-Info "Stopping Get-ProcessBreakdown.ps1 (PID: $($processBreakdownProc.Id))..."
+        # Stop getProcess.py when Invoke-SingleUFO.ps1 finishes
+        if ($processCaptureProc -and -not $processCaptureProc.HasExited) {
+            Write-Info "Stopping getProcess.py (PID: $($processCaptureProc.Id))..."
             try {
-                Stop-Process -Id $processBreakdownProc.Id -Force -ErrorAction Stop
-                Write-Info "Get-ProcessBreakdown.ps1 stopped successfully"
+                Stop-Process -Id $processCaptureProc.Id -Force -ErrorAction Stop
+                Write-Info "getProcess.py stopped successfully"
             } catch {
-                Write-Warn "Failed to stop Get-ProcessBreakdown.ps1: $($_.Exception.Message)"
+                Write-Warn "Failed to stop getProcess.py: $($_.Exception.Message)"
             }
-        } elseif ($processBreakdownProc -and $processBreakdownProc.HasExited) {
-            Write-Info "Get-ProcessBreakdown.ps1 already exited"
+        } elseif ($processCaptureProc -and $processCaptureProc.HasExited) {
+            Write-Info "getProcess.py already exited"
         }
     }
 
@@ -183,4 +185,3 @@ if ($failures.Count -gt 0) {
     Write-Host "All applications processed successfully." -ForegroundColor Green
     exit 0
 }
-
