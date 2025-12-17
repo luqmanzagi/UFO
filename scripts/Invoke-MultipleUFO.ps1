@@ -15,8 +15,16 @@ try {
 $env:PYTHONIOENCODING = "utf-8"
 
 # ---- config / inputs ---------------------------------------------------------
-$appsFile = "app.txt"     # one app name per line (Store name)
-$genericFile = "generic_time_1m.txt"     # optional extra prompt text
+# Resolve parent directory (where app.txt, helpers, rec, netdump, etc. are located)
+$scriptDir = if ($PSCommandPath) {
+    Split-Path -Parent $PSCommandPath
+} else {
+    (Get-Location).Path
+}
+$parentDir = Split-Path -Parent $scriptDir
+
+$appsFile = Join-Path $parentDir "app.txt"     # one app name per line (Store name)
+$genericFile = Join-Path $parentDir "generic_time_1m.txt"     # optional extra prompt text
 
 # ---- helper: write info/error conveniently ----------------------------------
 # Global log file stream (will be set in main loop)
@@ -59,28 +67,20 @@ $apps = Get-Content $appsFile | Where-Object { $_.Trim() -ne '' }
 $common = ""
 if (Test-Path $genericFile) { $common = Get-Content $genericFile -Raw }
 
-# Ensure .\rec exists next to this script
-# Resolve script directory safely (no assignment to $PSScriptRoot)
-$baseDir = if ($PSCommandPath) {
-    Split-Path -Parent $PSCommandPath
-} else {
-    (Get-Location).Path
-}
-
-# Ensure .\rec exists under the script (or current) directory
-$recDir = Join-Path $baseDir 'rec'
+# Ensure .\rec exists in parent directory
+$recDir = Join-Path $parentDir 'rec'
 if (-not (Test-Path -LiteralPath $recDir)) {
     New-Item -ItemType Directory -Path $recDir -Force | Out-Null
 }
 
-# Ensure .\netdump exists under the script (or current) directory
-$netdumpDir = Join-Path $baseDir 'netdump'
+# Ensure .\netdump exists in parent directory
+$netdumpDir = Join-Path $parentDir 'netdump'
 if (-not (Test-Path -LiteralPath $netdumpDir)) {
     New-Item -ItemType Directory -Path $netdumpDir -Force | Out-Null
 }
 
-# Ensure .\log_terminal exists under the script (or current) directory
-$logTerminalDir = Join-Path $baseDir 'log_terminal'
+# Ensure .\log_terminal exists in parent directory
+$logTerminalDir = Join-Path $parentDir 'log_terminal'
 if (-not (Test-Path -LiteralPath $logTerminalDir)) {
     New-Item -ItemType Directory -Path $logTerminalDir -Force | Out-Null
 }
@@ -247,8 +247,15 @@ function Get-RelatedIdsFromPsList {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)][string]$Target,
-        [string]$PsListPath = ".\helpers\pslist64.exe"
+        [string]$PsListPath = ""
     )
+
+    # Default to parent directory's helpers folder if not specified
+    if ([string]::IsNullOrWhiteSpace($PsListPath)) {
+        $scriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
+        $parentDir = Split-Path -Parent $scriptDir
+        $PsListPath = Join-Path $parentDir "helpers\pslist64.exe"
+    }
 
     $pids = @()
 
@@ -298,7 +305,7 @@ function Stop-IdsRobust {
     param(
         [Parameter(Mandatory=$true)][object[]]$Ids,
         [string]$AppName = "",
-        [string]$PsKillPath = ".\helpers\pskill64.exe",
+        [string]$PsKillPath = "",
         [switch]$Tree
     )
 
@@ -318,6 +325,13 @@ function Stop-IdsRobust {
     if (-not $pidList -or $pidList.Count -eq 0) {
         Warn "No related PIDs found to terminate for '$AppName'."
         return
+    }
+
+    # Default to parent directory's helpers folder if not specified
+    if ([string]::IsNullOrWhiteSpace($PsKillPath)) {
+        $scriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
+        $parentDir = Split-Path -Parent $scriptDir
+        $PsKillPath = Join-Path $parentDir "helpers\pskill64.exe"
     }
 
     try {
@@ -422,9 +436,12 @@ function Stop-NewProcesses {
 }
 
 function Stop-AppProcesses { param([Parameter(Mandatory)][string]$DisplayName)
+  $scriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
+  $parentDir = Split-Path -Parent $scriptDir
+  $pslistPath = Join-Path $parentDir "helpers\pslist64.exe"
   $allIds = @()
-  if (Test-Path -LiteralPath ".\helpers\pslist64.exe") {
-    $idsFromSys = Get-RelatedIdsFromPsList -Target $DisplayName
+  if (Test-Path -LiteralPath $pslistPath) {
+    $idsFromSys = Get-RelatedIdsFromPsList -Target $DisplayName -PsListPath $pslistPath
     if ($idsFromSys.Count -gt 0) { $allIds += $idsFromSys }
   } else { Fail "pslist64.exe not found; using native fallback." }
   try {
@@ -540,7 +557,9 @@ foreach ($rawApp in $apps) {
       Warn "Could not AUMID-launch '$storeName'. Used fallback to Start-menu keystrokes."
     }
 
-    python .\helpers\rec.py --grab gdigrab --cursor --out ".\rec\$($storeName -replace '[^a-zA-Z0-9]', '_').mp4" 2>&1 | ForEach-Object {
+    $helpersRecPath = Join-Path $parentDir "helpers\rec.py"
+    $recOutPath = Join-Path $recDir "$($storeName -replace '[^a-zA-Z0-9]', '_').mp4"
+    python $helpersRecPath --grab gdigrab --cursor --out $recOutPath 2>&1 | ForEach-Object {
       Write-Host $_
       if ($script:LogFileStream) {
         try {
@@ -560,7 +579,7 @@ foreach ($rawApp in $apps) {
       }
     }
     
-    $dumpFile = ".\netdump\$($storeName -replace '[^a-zA-Z0-9]', '_').mitm"
+    $dumpFile = Join-Path $netdumpDir "$($storeName -replace '[^a-zA-Z0-9]', '_').mitm"
     $mitmProc = Start-Mitmdump -OutFile $dumpFile -Mode local -IgnoreHosts @(
       '(^|\.)generativelanguage\.googleapis\.com$', '(^|\.)gradio\.live$'
       # '^127\.0\.0\.1:7861$'
@@ -576,7 +595,11 @@ $common
     $startTime = Get-Date
     Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
     
-    python -m ufo --task "$($displayName -replace ':', '')" --request "$request" 2>&1 | ForEach-Object {
+    # Change to parent directory to ensure python -m ufo runs from project root
+    # (needed for config files and logs to resolve correctly)
+    Push-Location $parentDir
+    try {
+      python -m ufo --task "$($displayName -replace ':', '')" --request "$request" 2>&1 | ForEach-Object {
       Write-Host $_
       if ($script:LogFileStream) {
         try {
@@ -594,6 +617,9 @@ $common
           }
         }
       }
+    }
+    } finally {
+      Pop-Location
     }
     
     # Stop new processes that appeared after baseline (excluding our own tools)
@@ -627,7 +653,8 @@ $common
     $elapsed = New-TimeSpan -Start $startTime -End $endTime
     Info ("Finished UFO for: {0} at {1} (elapsed {2})" -f $displayName, $endTime.ToString("yyyy-MM-dd HH:mm:ss"), $elapsed.ToString("hh\:mm\:ss"))
     
-    python .\helpers\end_rec.py 2>&1 | ForEach-Object {
+    $helpersEndRecPath = Join-Path $parentDir "helpers\end_rec.py"
+    python $helpersEndRecPath 2>&1 | ForEach-Object {
       Write-Host $_
       if ($script:LogFileStream) {
         try {
