@@ -71,7 +71,7 @@ $common = ""
 if (Test-Path $genericFile) { $common = Get-Content $genericFile -Raw }
 
 # Ensure .\rec exists in parent directory
-$recDir = Join-Path $parentDir 'rec'
+$recDir = Join-Path $parentDir 'screen_records'
 if (-not (Test-Path -LiteralPath $recDir)) {
     New-Item -ItemType Directory -Path $recDir -Force | Out-Null
 }
@@ -83,7 +83,7 @@ if (-not (Test-Path -LiteralPath $netdumpDir)) {
 }
 
 # Ensure .\log_terminal exists in parent directory
-$logTerminalDir = Join-Path $parentDir 'log_terminal'
+$logTerminalDir = Join-Path $parentDir 'terminal_logs'
 if (-not (Test-Path -LiteralPath $logTerminalDir)) {
     New-Item -ItemType Directory -Path $logTerminalDir -Force | Out-Null
 }
@@ -602,6 +602,7 @@ $common
 
   $startTime = Get-Date
   Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
+
   # Start-Sleep -Seconds 60
   
   # Change to parent directory to ensure python -m ufo runs from project root

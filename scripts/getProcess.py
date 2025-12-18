@@ -262,7 +262,7 @@ def main():
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.abspath(os.path.join(script_dir, os.pardir))
-    log_dir = os.path.join(parent_dir, "process_log")
+    log_dir = os.path.join(parent_dir, "process_logs")
     os.makedirs(log_dir, exist_ok=True)
 
     out_path = os.path.join(log_dir, safe_filename(args.app_name))
