@@ -652,34 +652,34 @@ $common
   $startTime = Get-Date
   Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
 
-  Start-Sleep -Seconds 60
+  # Start-Sleep -Seconds 60
   
-  # # Change to parent directory to ensure python -m ufo runs from project root
-  # # (needed for config files and logs to resolve correctly)
-  # Push-Location $parentDir
-  # try {
-  #   python -m ufo --task "$($displayName -replace ':', '')" --request "$request" 2>&1 | ForEach-Object {
-  #     Write-Host $_
-  #     if ($script:LogFileStream) {
-  #       try {
-  #         $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
-  #         $script:LogFileStream.WriteLine($logLine)
-  #         $script:LogFileStream.Flush()
-  #       } catch {
-  #         # If encoding fails, try to write a sanitized version
-  #         try {
-  #           $sanitized = $_ -replace '[^\x00-\x7F]', '?'
-  #           $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
-  #           $script:LogFileStream.Flush()
-  #         } catch {
-  #           # If even sanitized version fails, skip logging this line
-  #         }
-  #       }
-  #     }
-  #   }
-  # } finally {
-  #   Pop-Location
-  # }
+  # Change to parent directory to ensure python -m ufo runs from project root
+  # (needed for config files and logs to resolve correctly)
+  Push-Location $parentDir
+  try {
+    python -m ufo --task "$($displayName -replace ':', '')" --request "$request" 2>&1 | ForEach-Object {
+      Write-Host $_
+      if ($script:LogFileStream) {
+        try {
+          $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
+          $script:LogFileStream.WriteLine($logLine)
+          $script:LogFileStream.Flush()
+        } catch {
+          # If encoding fails, try to write a sanitized version
+          try {
+            $sanitized = $_ -replace '[^\x00-\x7F]', '?'
+            $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
+            $script:LogFileStream.Flush()
+          } catch {
+            # If even sanitized version fails, skip logging this line
+          }
+        }
+      }
+    }
+  } finally {
+    Pop-Location
+  }
   
   # Stop new processes that appeared after baseline (excluding our own tools)
   $excludePids = @()

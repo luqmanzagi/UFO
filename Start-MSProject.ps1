@@ -73,8 +73,10 @@ $baseDir = if ($PSCommandPath) {
 }
 
 $scriptsDir = Join-Path $baseDir "scripts"
+$helpersDir = Join-Path $baseDir "helpers"
 $singleRunScript = Join-Path $scriptsDir "Invoke-SingleUFO.ps1"
-$processCaptureScript = Join-Path $scriptsDir "getProcess.py"
+$processCaptureScript = Join-Path $scriptsDir "get_process.py"
+$basicStatScript = Join-Path $helpersDir "basic_stat.py"
 
 if (-not (Test-Path -LiteralPath $singleRunScript)) {
     Write-Error "Invoke-SingleUFO.ps1 not found at: $singleRunScript"
@@ -84,6 +86,23 @@ if (-not (Test-Path -LiteralPath $singleRunScript)) {
 if (-not (Test-Path -LiteralPath $processCaptureScript)) {
     Write-Error "getProcess.py not found at: $processCaptureScript"
     exit 1
+}
+
+# ---- run basic_stat.py before starting batch run -----------------------------
+if (Test-Path -LiteralPath $basicStatScript) {
+    Write-Info "Running basic_stat.py to collect system information..."
+    try {
+        $basicStatResult = & python.exe $basicStatScript 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Info "System information collected successfully"
+        } else {
+            Write-Warn "basic_stat.py exited with code $LASTEXITCODE"
+        }
+    } catch {
+        Write-Warn "Failed to run basic_stat.py: $($_.Exception.Message)"
+    }
+} else {
+    Write-Warn "basic_stat.py not found at: $basicStatScript"
 }
 
 # ---- main loop ----------------------------------------------------------------
