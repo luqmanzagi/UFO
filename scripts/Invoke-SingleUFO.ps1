@@ -70,22 +70,28 @@ function Fail($msg) {
 $common = ""
 if (Test-Path $genericFile) { $common = Get-Content $genericFile -Raw }
 
-# Ensure .\rec exists in parent directory
-$recDir = Join-Path $parentDir 'screen_records'
+# Ensure .\results\screen_records exists in parent directory
+$recDir = Join-Path $parentDir 'results\screen_records'
 if (-not (Test-Path -LiteralPath $recDir)) {
     New-Item -ItemType Directory -Path $recDir -Force | Out-Null
 }
 
-# Ensure .\netdump exists in parent directory
-$netdumpDir = Join-Path $parentDir 'netdump'
+# Ensure .\results\netdump exists in parent directory
+$netdumpDir = Join-Path $parentDir 'results\netdump'
 if (-not (Test-Path -LiteralPath $netdumpDir)) {
     New-Item -ItemType Directory -Path $netdumpDir -Force | Out-Null
 }
 
-# Ensure .\log_terminal exists in parent directory
-$logTerminalDir = Join-Path $parentDir 'terminal_logs'
+# Ensure .\results\logs\terminal exists in parent directory
+$logTerminalDir = Join-Path $parentDir 'results\logs\UFOterminal'
 if (-not (Test-Path -LiteralPath $logTerminalDir)) {
     New-Item -ItemType Directory -Path $logTerminalDir -Force | Out-Null
+}
+
+# Ensure .\results\log\mitmdump exists in parent directory
+$mitmLogDir = Join-Path $parentDir 'results\logs\mitmdump'
+if (-not (Test-Path -LiteralPath $mitmLogDir)) {
+    New-Item -ItemType Directory -Path $mitmLogDir -Force | Out-Null
 }
 
 # ---- helpers -----------------------------------------------------------------
@@ -468,7 +474,8 @@ function Start-Mitmdump {
     param(
         [string]$OutFile,
         [string]$Mode = "local",      # or "regular"
-        [string[]]$IgnoreHosts = @()
+        [string[]]$IgnoreHosts = @(),
+        [string]$LogFile = ""
     )
 
     if (-not (Get-Command mitmdump -ErrorAction SilentlyContinue)) {
@@ -481,11 +488,29 @@ function Start-Mitmdump {
         $args += @("--ignore-hosts", $pat)  # <-- repeat flag per pattern
     }
 
-    Info ("Start-Process mitmdump " + (( $args | ForEach-Object {
-      '"' + ($_ -replace '"','""') + '"'
-  }) -join ' '))
-  
-    Start-Process -FilePath "mitmdump" -ArgumentList $args -WindowStyle Hidden -PassThru
+    $quotedArgs = $args | ForEach-Object {
+      if ($_ -match '\s') { '"' + ($_ -replace '"','""') + '"' } else { $_ }
+    }
+    $argString = $quotedArgs -join ' '
+
+    Info ("Start-Process mitmdump " + $argString)
+    
+    $startParams = @{
+        FilePath     = "mitmdump"
+        ArgumentList = $argString   # single string to preserve quoting on PS5
+        WindowStyle  = 'Hidden'
+        PassThru     = $true
+    }
+
+    if ($LogFile) {
+        # capture stdout/stderr; they must be different files for Start-Process
+        $outPath = $LogFile
+        $errPath = [IO.Path]::ChangeExtension($LogFile, ".err.log")
+        $startParams.RedirectStandardError  = $errPath
+        $startParams.RedirectStandardOutput = $outPath
+    }
+
+    Start-Process @startParams
 }
 
 
@@ -498,17 +523,22 @@ function Stop-Mitmdump {
     }
 }
 
-# (Optional) enable/disable system proxy around the run (helps UWP/system apps use the proxy)
 # function Enable-SystemProxy {
 #     param([string]$Endpoint = "127.0.0.1:8080")
 #     try {
 #         netsh winhttp set proxy $Endpoint | Out-Null
-#     } catch { Warn "Couldn't set WinHTTP proxy: $($_.Exception.Message)" }
+#         Info "WinHTTP proxy set to $Endpoint"
+#     } catch {
+#         Warn "Couldn't set WinHTTP proxy: $($_.Exception.Message)"
+#     }
 # }
 # function Disable-SystemProxy {
 #     try {
 #         netsh winhttp reset proxy | Out-Null
-#     } catch { Warn "Couldn't reset WinHTTP proxy: $($_.Exception.Message)" }
+#         Info "WinHTTP proxy reset"
+#     } catch {
+#         Warn "Couldn't reset WinHTTP proxy: $($_.Exception.Message)"
+#     }
 # }
 
 # ---- main --------------------------------------------------------------------
@@ -557,6 +587,8 @@ try {
 }
 
 try {
+  # Enable-SystemProxy "127.0.0.1:8080"
+  try {
   # Log the baseline capture and launch status now that log file is open
   Info "Captured baseline process IDs: $($baselinePids.Count) processes running before app launch"
   if ($launched) {
@@ -588,10 +620,27 @@ try {
   }
   
   $dumpFile = Join-Path $netdumpDir "$($storeName -replace '[^a-zA-Z0-9]', '_').mitm"
+  $mitmLogPath = Join-Path $mitmLogDir "$($storeName -replace '[^a-zA-Z0-9]', '_').mitmdump.log"
+  if (Test-Path -LiteralPath $mitmLogPath) { Remove-Item -LiteralPath $mitmLogPath -Force -ErrorAction SilentlyContinue }
   $mitmProc = Start-Mitmdump -OutFile $dumpFile -Mode local -IgnoreHosts @(
     '(^|\.)generativelanguage\.googleapis\.com$', '(^|\.)gradio\.live$'
     # '^127\.0\.0\.1:7861$'
-  )
+  ) -LogFile $mitmLogPath
+  if ($mitmProc) {
+    Info "mitmdump PID $($mitmProc.Id) writing to $dumpFile"
+  } else {
+    Fail "mitmdump failed to start; no process object returned."
+  }
+  # quick check for immediate crash (e.g., port in use); surface recent log lines
+  Start-Sleep -Milliseconds 500
+  if ($mitmProc -and $mitmProc.HasExited) {
+    $code = $mitmProc.ExitCode
+    Warn "mitmdump exited immediately with code $code"
+    if (Test-Path -LiteralPath $mitmLogPath) {
+      $tail = Get-Content -LiteralPath $mitmLogPath -Tail 20 -ErrorAction SilentlyContinue
+      foreach ($line in $tail) { Warn "mitmdump: $line" }
+    }
+  }
 
   # Build UFO request; app should already be running now
   $request = @"
@@ -603,34 +652,34 @@ $common
   $startTime = Get-Date
   Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
 
-  # Start-Sleep -Seconds 60
+  Start-Sleep -Seconds 60
   
-  # Change to parent directory to ensure python -m ufo runs from project root
-  # (needed for config files and logs to resolve correctly)
-  Push-Location $parentDir
-  try {
-    python -m ufo --task "$($displayName -replace ':', '')" --request "$request" 2>&1 | ForEach-Object {
-      Write-Host $_
-      if ($script:LogFileStream) {
-        try {
-          $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
-          $script:LogFileStream.WriteLine($logLine)
-          $script:LogFileStream.Flush()
-        } catch {
-          # If encoding fails, try to write a sanitized version
-          try {
-            $sanitized = $_ -replace '[^\x00-\x7F]', '?'
-            $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
-            $script:LogFileStream.Flush()
-          } catch {
-            # If even sanitized version fails, skip logging this line
-          }
-        }
-      }
-    }
-  } finally {
-    Pop-Location
-  }
+  # # Change to parent directory to ensure python -m ufo runs from project root
+  # # (needed for config files and logs to resolve correctly)
+  # Push-Location $parentDir
+  # try {
+  #   python -m ufo --task "$($displayName -replace ':', '')" --request "$request" 2>&1 | ForEach-Object {
+  #     Write-Host $_
+  #     if ($script:LogFileStream) {
+  #       try {
+  #         $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
+  #         $script:LogFileStream.WriteLine($logLine)
+  #         $script:LogFileStream.Flush()
+  #       } catch {
+  #         # If encoding fails, try to write a sanitized version
+  #         try {
+  #           $sanitized = $_ -replace '[^\x00-\x7F]', '?'
+  #           $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
+  #           $script:LogFileStream.Flush()
+  #         } catch {
+  #           # If even sanitized version fails, skip logging this line
+  #         }
+  #       }
+  #     }
+  #   }
+  # } finally {
+  #   Pop-Location
+  # }
   
   # Stop new processes that appeared after baseline (excluding our own tools)
   $excludePids = @()
@@ -658,7 +707,12 @@ $common
     try { Stop-AppProcesses -DisplayName $displayName } catch { Warn "Stop-AppProcesses errored: $($_.Exception.Message)" }
   }
   Stop-Mitmdump -Process $mitmProc
-  Info "Mitmdump stopped; output saved to $dumpFile"
+  if (Test-Path -LiteralPath $dumpFile) {
+    $dumpSize = (Get-Item -LiteralPath $dumpFile).Length
+    Info "Mitmdump stopped; output saved to $dumpFile (size: $dumpSize bytes)"
+  } else {
+    Warn "Mitmdump output file not found at $dumpFile"
+  }
   $endTime = Get-Date
   $elapsed = New-TimeSpan -Start $startTime -End $endTime
   Info ("Finished UFO for: {0} at {1} (elapsed {2})" -f $displayName, $endTime.ToString("yyyy-MM-dd HH:mm:ss"), $elapsed.ToString("hh\:mm\:ss"))
@@ -682,6 +736,9 @@ $common
         }
       }
     }
+  }
+  } finally {
+    # Disable-SystemProxy
   }
 } finally {
   # Close log file stream for this app
