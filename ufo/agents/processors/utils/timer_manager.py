@@ -13,7 +13,7 @@ import re
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
@@ -73,6 +73,7 @@ class TimerManager:
         """Initialize the timer manager."""
         self.active_constraints: Dict[TaskPhase, TimeConstraint] = {}
         self.parsed_constraints: Dict[TaskPhase, TimeConstraint] = {}  # Parsed but not yet started
+        self.started_phases: Set[TaskPhase] = set()  # Track phases that have been started (even if expired)
         self.logger = logging.getLogger(f"{__name__}.TimerManager")
     
     def parse_time_constraints(self, prompt: str) -> List[TimeConstraint]:
@@ -152,8 +153,11 @@ class TimerManager:
             ))
         
         # Store parsed constraints for later starting
+        # Only add if phase hasn't been parsed yet AND hasn't been started yet
         for constraint in constraints:
-            if constraint.phase not in self.parsed_constraints:
+            if (constraint.phase not in self.parsed_constraints and 
+                constraint.phase not in self.active_constraints and
+                constraint.phase not in self.started_phases):
                 self.parsed_constraints[constraint.phase] = constraint
         
         return constraints
@@ -168,8 +172,8 @@ class TimerManager:
         phase_order = [TaskPhase.RANDOM_CLICKING, TaskPhase.TIMED_ACTION, TaskPhase.CLOSE_APP]
         
         for phase in phase_order:
-            # If phase is already active, skip it
-            if phase in self.active_constraints and self.active_constraints[phase].is_active():
+            # If phase has already been started (even if expired), skip it to prevent restarting
+            if phase in self.active_constraints or phase in self.started_phases:
                 continue
             # If phase is parsed but not started, return it
             if phase in self.parsed_constraints:
@@ -185,6 +189,7 @@ class TimerManager:
         """
         constraint.start_time = time.time()
         self.active_constraints[constraint.phase] = constraint
+        self.started_phases.add(constraint.phase)  # Track that this phase has been started
         self.logger.info(
             f"Started {constraint.phase.value} phase: "
             f"{constraint.duration_seconds}s ({constraint.action_description})"

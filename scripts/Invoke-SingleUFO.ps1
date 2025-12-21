@@ -30,7 +30,7 @@ $scriptDir = if ($PSCommandPath) {
     (Get-Location).Path
 }
 $parentDir = Split-Path -Parent $scriptDir
-$genericFile = Join-Path $parentDir "generic_time_1m.txt"     # optional extra prompt text
+$genericFile = Join-Path $parentDir "generic_time_1m.md"     # optional extra prompt text
 
 # ---- helper: write info/error conveniently ----------------------------------
 # Global log file stream (will be set in main loop)
@@ -64,6 +64,37 @@ function Fail($msg) {
         $script:LogFileStream.WriteLine($logMsg)
         $script:LogFileStream.Flush()
     }
+}
+
+# ---- helper: read secrets from YAML -----------------------------------------
+function Get-SecretsFromYaml {
+    param([string]$YamlPath)
+    
+    $secrets = @{
+        username = ""
+        password = ""
+    }
+    
+    if (-not (Test-Path -LiteralPath $YamlPath)) {
+        Warn "Secrets file not found at: $YamlPath"
+        return $secrets
+    }
+    
+    try {
+        $yamlContent = Get-Content -LiteralPath $YamlPath -Raw
+        # Simple YAML parsing for APP_CREDENTIALS section
+        # Handle both double and single quotes, and unquoted values
+        if ($yamlContent -match '(?s)APP_CREDENTIALS:\s*\n\s*username:\s*(?:"([^"]+)"|''([^'']+)''|([^\s\n]+))') {
+            $secrets.username = if ($Matches[1]) { $Matches[1] } elseif ($Matches[2]) { $Matches[2] } else { $Matches[3] }
+        }
+        if ($yamlContent -match '(?s)password:\s*(?:"([^"]+)"|''([^'']+)''|([^\s\n]+))') {
+            $secrets.password = if ($Matches[1]) { $Matches[1] } elseif ($Matches[2]) { $Matches[2] } else { $Matches[3] }
+        }
+    } catch {
+        Warn "Failed to parse secrets from $YamlPath : $($_.Exception.Message)"
+    }
+    
+    return $secrets
 }
 
 # ---- read files --------------------------------------------------------------
@@ -599,8 +630,16 @@ try {
 
   $helpersRecPath = Join-Path $parentDir "helpers\rec.py"
   $recOutPath = Join-Path $recDir "$($storeName -replace '[^a-zA-Z0-9]', '_').mp4"
+  
+  # Start recording and capture the FFmpeg PID
+  $recordingPid = $null
   python $helpersRecPath --grab gdigrab --cursor --out $recOutPath 2>&1 | ForEach-Object {
     Write-Host $_
+    # Try to extract PID from the output (format: "Recording started (PID 21196)")
+    if ($_ -match 'Recording started \(PID (\d+)\)') {
+      $recordingPid = [int]$Matches[1]
+      Info "Captured recording FFmpeg PID: $recordingPid"
+    }
     if ($script:LogFileStream) {
       try {
         $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
@@ -615,6 +654,19 @@ try {
         } catch {
           # If even sanitized version fails, skip logging this line
         }
+      }
+    }
+  }
+  
+  # If PID wasn't captured from output, try reading from the PID file
+  if (-not $recordingPid) {
+    $pidFile = Join-Path $env:TEMP "screenrec_ffmpeg.pid"
+    if (Test-Path -LiteralPath $pidFile) {
+      try {
+        $recordingPid = [int](Get-Content -LiteralPath $pidFile -Raw).Trim()
+        Info "Read recording FFmpeg PID from file: $recordingPid"
+      } catch {
+        Warn "Failed to read recording PID from file: $($_.Exception.Message)"
       }
     }
   }
@@ -642,14 +694,58 @@ try {
     }
   }
 
+  # Load secrets from local_secrets.yaml and inject into prompt
+  $secretsYamlPath = Join-Path $parentDir "config\ufo\local_secrets.yaml"
+  $secrets = Get-SecretsFromYaml -YamlPath $secretsYamlPath
+  
+  # Replace placeholder secrets in the prompt with actual values
+  $injectedCommon = $common
+  if ($secrets.username -and $secrets.password) {
+    # Escape single quotes in credentials for safe insertion (needed for assignment lines in SECRETS section)
+    $escapedUsername = $secrets.username -replace "'", "''"
+    $escapedPassword = $secrets.password -replace "'", "''"
+    
+    # Escape special regex characters in credentials for safe replacement
+    $escapedUsernameRegex = [regex]::Escape($secrets.username)
+    $escapedPasswordRegex = [regex]::Escape($secrets.password)
+    
+    # CRITICAL: Replace ALL occurrences of secrets['app'].username and secrets['app'].password 
+    # throughout the entire prompt with actual values (for instruction lines)
+    # This ensures the AI agent uses the actual credentials, not the literal string
+    $injectedCommon = $injectedCommon -replace "secrets\['app'\]\.username", $secrets.username
+    $injectedCommon = $injectedCommon -replace "secrets\['app'\]\.password", $secrets.password
+    
+    # Now restore the SECRETS section with proper assignment format
+    # The global replacement above also replaced the assignment lines, so we need to fix them back
+    $secretsSection = @"
+====================
+SECRETS (FOR THIS SESSION)
+====================
+# Secrets are injected externally (e.g., via Invoke-SingleUFO.ps1 with env vars)
+# Populate at runtime or leave blank to run without credentials.
+secrets['app'].username = '$escapedUsername'
+secrets['app'].password = '$escapedPassword'
+"@
+    # Replace the SECRETS section (which now has actual values instead of assignment syntax)
+    if ($injectedCommon -match '(?s)(====================\s*SECRETS.*?====================)') {
+      # Find everything from SECRETS header to the next section or end
+      $injectedCommon = $injectedCommon -replace '(?s)====================\s*SECRETS.*?====================.*?(?=\n====================|\Z)', $secretsSection
+    }
+    
+    Info "Credentials loaded from local_secrets.yaml (username: $($secrets.username))"
+  } else {
+    Warn "No credentials found in local_secrets.yaml - prompt will use empty credentials"
+  }
+  
   # Build UFO request; app should already be running now
   $request = @"
 Bring the '$displayName' app to the front and then do:
 
-$common
+$injectedCommon
 "@
 
   $startTime = Get-Date
+  # Warn $request
   Info ("Starting UFO for: {0} on {1}" -f$displayName, $startTime.ToString("yyyy-MM-dd HH:mm:ss"))
 
   # Start-Sleep -Seconds 60
@@ -658,23 +754,71 @@ $common
   # (needed for config files and logs to resolve correctly)
   Push-Location $parentDir
   try {
-    python -m ufo --task "$($displayName -replace ':', '')" --request "$request" 2>&1 | ForEach-Object {
-      Write-Host $_
-      if ($script:LogFileStream) {
-        try {
-          $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
-          $script:LogFileStream.WriteLine($logLine)
-          $script:LogFileStream.Flush()
-        } catch {
-          # If encoding fails, try to write a sanitized version
+    # PowerShell has issues passing multi-line strings to external programs
+    # Solution: Write request to temp file, use Python wrapper script to read and pass to UFO
+    $taskName = $displayName -replace ':', ''
+    
+    # Write request to temporary file
+    $tempRequestFile = Join-Path $env:TEMP "ufo_request_$(Get-Date -Format 'yyyyMMdd_HHmmss')_$([System.Guid]::NewGuid().ToString('N').Substring(0,8)).txt"
+    $tempWrapperFile = Join-Path $env:TEMP "ufo_wrapper_$(Get-Date -Format 'yyyyMMdd_HHmmss')_$([System.Guid]::NewGuid().ToString('N').Substring(0,8)).py"
+    
+    try {
+      # Write request to file
+      $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+      [System.IO.File]::WriteAllText($tempRequestFile, $request, $utf8NoBom)
+      
+      # Create a Python wrapper script that reads the request from file and calls UFO via subprocess
+      # This avoids PowerShell's argument parsing issues entirely
+      $requestFileEscaped = $tempRequestFile.Replace('\', '\\').Replace("'", "\\'")
+      $wrapperScript = @"
+import subprocess
+import sys
+import os
+
+# Read request from file
+with open(r'$requestFileEscaped', 'r', encoding='utf-8') as f:
+    request_content = f.read().strip()
+
+# Call UFO via subprocess with proper argument handling
+# subprocess handles multi-line strings correctly
+result = subprocess.run(
+    [sys.executable, '-m', 'ufo', '--task', '$taskName', '--request', request_content],
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+    text=True,
+    encoding='utf-8'
+)
+sys.exit(result.returncode)
+"@
+      [System.IO.File]::WriteAllText($tempWrapperFile, $wrapperScript, $utf8NoBom)
+      
+      # Execute the wrapper script
+      python $tempWrapperFile 2>&1 | ForEach-Object {
+        Write-Host $_
+        if ($script:LogFileStream) {
           try {
-            $sanitized = $_ -replace '[^\x00-\x7F]', '?'
-            $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
+            $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
+            $script:LogFileStream.WriteLine($logLine)
             $script:LogFileStream.Flush()
           } catch {
-            # If even sanitized version fails, skip logging this line
+            # If encoding fails, try to write a sanitized version
+            try {
+              $sanitized = $_ -replace '[^\x00-\x7F]', '?'
+              $script:LogFileStream.WriteLine((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $sanitized)
+              $script:LogFileStream.Flush()
+            } catch {
+              # If even sanitized version fails, skip logging this line
+            }
           }
         }
+      }
+    } finally {
+      # Clean up temporary files
+      if (Test-Path -LiteralPath $tempRequestFile) {
+        Remove-Item -LiteralPath $tempRequestFile -Force -ErrorAction SilentlyContinue
+      }
+      if (Test-Path -LiteralPath $tempWrapperFile) {
+        Remove-Item -LiteralPath $tempWrapperFile -Force -ErrorAction SilentlyContinue
       }
     }
   } finally {
@@ -694,6 +838,22 @@ $common
     $pythonProcs = Get-Process python -ErrorAction SilentlyContinue
     foreach ($p in $pythonProcs) {
       $excludePids += $p.Id
+    }
+    # Exclude FFmpeg recording process (critical - prevents premature termination of recording)
+    if ($recordingPid) {
+      $excludePids += $recordingPid
+      Info "Excluding recording FFmpeg process (PID: $recordingPid) from termination"
+    } else {
+      # Fallback: try to find FFmpeg process by name
+      try {
+        $ffmpegProcs = Get-Process ffmpeg -ErrorAction SilentlyContinue
+        foreach ($p in $ffmpegProcs) {
+          $excludePids += $p.Id
+          Info "Excluding FFmpeg process (PID: $($p.Id)) from termination"
+        }
+      } catch {
+        # FFmpeg might not be in PATH or process name might differ
+      }
     }
   } catch {
     Warn "Failed to get exclude PIDs: $($_.Exception.Message)"
