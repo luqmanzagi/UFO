@@ -8,7 +8,8 @@ TOP_P: 0.0  # The top_p of the model: the lower the value, the more conservative
 TIMEOUT: 60  # The call timeout(s), default is 1 mins
 
 # Control Backend
-CONTROL_BACKEND: ["uia"]  # The backend for control action: uia, omniparser
+# CONTROL_BACKEND: ["uia"]  # The backend for control action: uia, omniparser
+CONTROL_BACKEND: ["uia", "omniparser"]  # The backend for control action: uia, omniparser
 IOU_THRESHOLD_FOR_MERGE: 0.1  # The iou threshold for merging the boxes between controls
 
 # Execution Limits
@@ -88,7 +89,7 @@ QA_PAIR_NUM: 20  # The number of QA pairs for the customization
 
 # Omniparser
 OMNIPARSER:
-  ENDPOINT: "https://aeb8ef731536d2d6c2.gradio.live"
+  ENDPOINT: "https://0e773eaf857db5d38e.gradio.live/"
   BOX_THRESHOLD: 0.05
   IOU_THRESHOLD: 0.1
   USE_PADDLEOCR: True

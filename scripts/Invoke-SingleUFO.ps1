@@ -30,7 +30,7 @@ $scriptDir = if ($PSCommandPath) {
     (Get-Location).Path
 }
 $parentDir = Split-Path -Parent $scriptDir
-$genericFile = Join-Path $parentDir "generic_time_1m.md"     # optional extra prompt text
+$genericFile = Join-Path $parentDir "generic_time.md"     # optional extra prompt text
 
 # ---- helper: write info/error conveniently ----------------------------------
 # Global log file stream (will be set in main loop)
@@ -877,6 +877,29 @@ sys.exit(result.returncode)
   $elapsed = New-TimeSpan -Start $startTime -End $endTime
   Info ("Finished UFO for: {0} at {1} (elapsed {2})" -f $displayName, $endTime.ToString("yyyy-MM-dd HH:mm:ss"), $elapsed.ToString("hh\:mm\:ss"))
   
+  # Flush DNS if VPN app was run (VPN apps often modify DNS settings that persist)
+  if ($displayName -match "VPN") {
+    Info "VPN application detected in display name. Flushing DNS settings..."
+    $helpersFlushNsPath = Join-Path $parentDir "helpers\flush_ns.ps1"
+    try {
+      & $helpersFlushNsPath -SetGoogleDns 2>&1 | ForEach-Object {
+        Write-Host $_
+        if ($script:LogFileStream) {
+          try {
+            $logLine = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $_
+            $script:LogFileStream.WriteLine($logLine)
+            $script:LogFileStream.Flush()
+          } catch {
+            # If encoding fails, skip logging this line
+          }
+        }
+      }
+      Info "DNS flush completed successfully"
+    } catch {
+      Warn "Failed to flush DNS: $($_.Exception.Message)"
+    }
+  }
+
   $helpersEndRecPath = Join-Path $parentDir "helpers\end_rec.py"
   python $helpersEndRecPath 2>&1 | ForEach-Object {
     Write-Host $_

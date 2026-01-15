@@ -1,6 +1,6 @@
 # Requires: Windows PowerShell 5+ (or PowerShell 7) on Windows 10/11
 # Usage: .\msproject.ps1
-# This script reads applications from app.txt and runs Invoke-SingleUFO.ps1 for each one
+# This script reads applications from targets/app_1.json and runs Invoke-SingleUFO.ps1 for each one
 # In parallel with scripts/getProcess.py, which is stopped when Invoke-SingleUFO.ps1 completes
 
 # Set console output encoding to UTF-8 to handle Unicode characters (emojis, etc.)
@@ -13,9 +13,6 @@ try {
 } catch {
     # If chcp fails, continue anyway
 }
-
-# ---- config / inputs ---------------------------------------------------------
-$appsFile = "app.txt"     # one app name per line (Store name)
 
 # ---- helper functions --------------------------------------------------------
 function Write-Info($msg) {
@@ -52,24 +49,33 @@ function Write-Error($msg) {
     Write-Error "[$timestamp] [ERROR] $msg"
 }
 
-# ---- read applications from file ----------------------------------------------
-if (-not (Test-Path $appsFile)) { 
-    Write-Error "Missing apps file: $appsFile"
-    exit 1
-}
-
-$apps = Get-Content $appsFile | Where-Object { $_.Trim() -ne '' }
-
-if ($apps.Count -eq 0) {
-    Write-Warn "No applications found in $appsFile"
-    exit 0
-}
-
 # Resolve script directory to find scripts folder
 $baseDir = if ($PSCommandPath) {
     Split-Path -Parent $PSCommandPath
 } else {
     (Get-Location).Path
+}
+
+# ---- read applications from file ----------------------------------------------
+$appsFile = Join-Path $baseDir "targets\app_10.json"
+# $appsFile = Join-Path $baseDir "app.txt"
+
+if (-not (Test-Path $appsFile)) { 
+    Write-Error "Missing apps file: $appsFile"
+    exit 1
+}
+
+try {
+    $jsonContent = Get-Content $appsFile -Raw | ConvertFrom-Json
+    $apps = $jsonContent | ForEach-Object { $_.itemName } | Where-Object { $_.Trim() -ne '' }
+} catch {
+    Write-Error "Failed to parse JSON file $appsFile : $($_.Exception.Message)"
+    exit 1
+}
+
+if ($apps.Count -eq 0) {
+    Write-Warn "No applications found in $appsFile"
+    exit 0
 }
 
 $scriptsDir = Join-Path $baseDir "scripts"
